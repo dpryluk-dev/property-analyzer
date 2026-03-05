@@ -1,0 +1,119 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Property {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Parsed MLS fields
+  mlsId       String?
+  address     String
+  city        String?
+  state       String   @default("MA")
+  zip         String?
+  type        String   @default("Condo")
+  complex     String?
+  bedrooms    Float    @default(0)
+  bathrooms   Float    @default(0)
+  sqft        Float    @default(0)
+  yearBuilt   Int?
+  listPrice   Float
+  hoaFee      Float    @default(0)
+  hoaIncludes String?
+  taxAnnual   Float    @default(0)
+  taxYear     Int      @default(2025)
+  assessed    Float?
+  parking     Int      @default(0)
+  dom         Int      @default(0)
+
+  // Raw MLS text (for re-parsing)
+  rawMls      String?
+
+  // User adjustments
+  adjPrice    Float?
+  adjRent     Float?
+
+  // Relations
+  rentResearch RentResearch?
+  analysis     Analysis?
+
+  @@index([city, state, zip])
+  @@index([mlsId])
+}
+
+model RentResearch {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+
+  propertyId  String   @unique
+  property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  rent        Float
+  low         Float
+  high        Float
+  confidence  String   @default("Medium")
+  methodology String?
+
+  comps       RentComp[]
+}
+
+model RentComp {
+  id              String       @id @default(cuid())
+  rentResearchId  String
+  rentResearch    RentResearch @relation(fields: [rentResearchId], references: [id], onDelete: Cascade)
+
+  address         String
+  rent            Float
+  note            String?
+}
+
+model Analysis {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  propertyId  String   @unique
+  property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  // Computed at given price/rent
+  priceUsed   Float
+  rentUsed    Float
+  totalExpMo  Float
+  netMo       Float
+  capRate     Float
+  expRatio    Float
+  grm         Float
+  breakMo     Int
+  rating      String
+
+  expenses    Expense[]
+  observations Observation[]
+}
+
+model Expense {
+  id          String   @id @default(cuid())
+  analysisId  String
+  analysis    Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  name        String
+  monthly     Float
+  note        String?
+  sortOrder   Int      @default(0)
+}
+
+model Observation {
+  id          String   @id @default(cuid())
+  analysisId  String
+  analysis    Analysis @relation(fields: [analysisId], references: [id], onDelete: Cascade)
+
+  color       String
+  icon        String
+  text        String
+}
