@@ -105,6 +105,7 @@ export async function getPortfolio() {
     include: {
       rentResearch: { include: { comps: true } },
       analysis: { include: { expenses: { orderBy: { sortOrder: 'asc' } }, observations: true } },
+      dealNotes: { orderBy: { createdAt: 'desc' } },
     },
   });
 }
@@ -166,5 +167,31 @@ export async function updateAdjustments(id: string, adjPrice: number, adjRent: n
     },
   });
 
+  return getPortfolio();
+}
+
+export async function updateDealStage(propertyId: string, stage: string) {
+  await prisma.property.update({
+    where: { id: propertyId },
+    data: { dealStage: stage },
+  });
+  return getPortfolio();
+}
+
+export async function addDealNote(propertyId: string, text: string, stage: string, milestone: boolean = false) {
+  await prisma.dealNote.create({
+    data: { propertyId, text, stage, milestone },
+  });
+  return getPortfolio();
+}
+
+export async function updatePurchaseInfo(propertyId: string, purchasePrice: number, closedDate: string | null) {
+  await prisma.property.update({
+    where: { id: propertyId },
+    data: {
+      purchasePrice,
+      closedDate: closedDate ? new Date(closedDate) : null,
+    },
+  });
   return getPortfolio();
 }

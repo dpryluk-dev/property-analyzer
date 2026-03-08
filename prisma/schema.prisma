@@ -40,9 +40,15 @@ model Property {
   adjPrice    Float?
   adjRent     Float?
 
+  // Deal tracking
+  dealStage     String    @default("Prospect")
+  purchasePrice Float?
+  closedDate    DateTime?
+
   // Relations
   rentResearch RentResearch?
   analysis     Analysis?
+  dealNotes    DealNote[]
 
   @@index([city, state, zip])
   @@index([mlsId])
@@ -116,4 +122,16 @@ model Observation {
   color       String
   icon        String
   text        String
+}
+
+model DealNote {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+
+  propertyId  String
+  property    Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+
+  stage       String
+  text        String
+  milestone   Boolean  @default(false)
 }

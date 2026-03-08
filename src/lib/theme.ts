@@ -38,3 +38,23 @@ export function fmt(v: number): string {
 export function pct(v: number): string {
   return v.toFixed(2) + '%';
 }
+
+export const stageColors: Record<string, string> = {
+  'Prospect': '#64748B',
+  'Under Contract': '#FBBF24',
+  'Closed': '#4F8CFF',
+  'Rehabbing': '#F59E0B',
+  'Leased': '#34D399',
+  'Refinanced': '#8B5CF6',
+  'Cash-flowing': '#10B981',
+};
+
+export const STAGES = [
+  'Prospect', 'Under Contract', 'Closed', 'Rehabbing', 'Leased', 'Refinanced', 'Cash-flowing',
+] as const;
+
+export function dscrColor(dscr: number): string {
+  if (dscr >= 1.25) return theme.green;
+  if (dscr >= 1.0) return theme.yellow;
+  return theme.red;
+}

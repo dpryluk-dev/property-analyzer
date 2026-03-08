@@ -4,6 +4,10 @@ import { useState, useTransition, useCallback } from 'react';
 import { analyzeProperty, deleteProperty, updateAdjustments, getPortfolio } from '@/lib/actions';
 import { theme as C, fmt, pct, ratingColor } from '@/lib/theme';
 import { PortfolioCard } from './PortfolioCard';
+import { RefinanceCalc } from './RefinanceCalc';
+import { Dashboard } from './Dashboard';
+import { DealTracker } from './DealTracker';
+import { ScenarioModeler } from './ScenarioModeler';
 
 interface PropertyAppProps {
   initialPortfolio: any[];
@@ -13,7 +17,7 @@ export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
   const [raw, setRaw] = useState('');
   const [portfolio, setPortfolio] = useState(initialPortfolio);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [tab, setTab] = useState(initialPortfolio.length > 0 ? 'portfolio' : 'analyze');
+  const [tab, setTab] = useState<'analyze' | 'portfolio' | 'refinance' | 'dashboard' | 'deals' | 'scenarios'>(initialPortfolio.length > 0 ? 'portfolio' : 'analyze');
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const [status, setStatus] = useState('');
@@ -54,6 +58,10 @@ export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
     });
   }, []);
 
+  const refreshPortfolio = useCallback(async (updated: any[]) => {
+    setPortfolio(JSON.parse(JSON.stringify(updated)));
+  }, []);
+
   const avgCap = portfolio.length > 0
     ? portfolio.reduce((s: number, p: any) => s + (p.analysis?.capRate || 0), 0) / portfolio.length
     : 0;
@@ -65,14 +73,21 @@ export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
   return (
     <>
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: C.surface, borderRadius: 8, padding: 3, border: `1px solid ${C.border}` }}>
-        {(['analyze', 'portfolio'] as const).map(id => (
-          <button key={id} onClick={() => setTab(id)} style={{
-            flex: 1, padding: '9px 0', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 6,
-            cursor: 'pointer', background: tab === id ? C.accent : 'transparent',
-            color: tab === id ? C.white : C.dim,
+      <div style={{ display: 'flex', gap: 4, marginBottom: 16, background: C.surface, borderRadius: 8, padding: 3, border: `1px solid ${C.border}`, overflowX: 'auto' }}>
+        {([
+          { id: 'analyze' as const, label: 'Analyze' },
+          { id: 'portfolio' as const, label: `Portfolio${portfolio.length ? ` (${portfolio.length})` : ''}` },
+          { id: 'refinance' as const, label: 'Refinance' },
+          { id: 'dashboard' as const, label: 'Dashboard' },
+          { id: 'deals' as const, label: 'Deals' },
+          { id: 'scenarios' as const, label: 'Scenarios' },
+        ]).map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            flex: 'none', padding: '9px 14px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 6,
+            cursor: 'pointer', background: tab === t.id ? C.accent : 'transparent',
+            color: tab === t.id ? C.white : C.dim, whiteSpace: 'nowrap',
           }}>
-            {id === 'analyze' ? 'Analyze New' : `Portfolio${portfolio.length ? ` (${portfolio.length})` : ''}`}
+            {t.label}
           </button>
         ))}
       </div>
@@ -177,6 +192,34 @@ export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
               onUpdate={handleUpdate}
             />
           ))}
+        </div>
+      )}
+
+      {/* Refinance Tab */}
+      {tab === 'refinance' && (
+        <div className="fade-in">
+          <RefinanceCalc portfolio={portfolio} />
+        </div>
+      )}
+
+      {/* Dashboard Tab */}
+      {tab === 'dashboard' && (
+        <div className="fade-in">
+          <Dashboard portfolio={portfolio} />
+        </div>
+      )}
+
+      {/* Deals Tab */}
+      {tab === 'deals' && (
+        <div className="fade-in">
+          <DealTracker portfolio={portfolio} onUpdate={refreshPortfolio} />
+        </div>
+      )}
+
+      {/* Scenarios Tab */}
+      {tab === 'scenarios' && (
+        <div className="fade-in">
+          <ScenarioModeler portfolio={portfolio} />
         </div>
       )}
 

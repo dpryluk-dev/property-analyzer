@@ -32,7 +32,7 @@ export function generateShareImage(
 
   ctx.fillStyle = '#4F8CFF';
   ctx.font = 'bold 14px -apple-system, sans-serif';
-  ctx.fillText('INVESTMENT PROPERTY ANALYSIS', 60, y);
+  ctx.fillText('PRYLUK-LEWIN REAL ESTATE HUB', 60, y);
 
   const badgeW = ctx.measureText(a.rating).width + 32;
   ctx.fillStyle = rc + '22';

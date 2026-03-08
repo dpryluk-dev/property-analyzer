@@ -1,0 +1,21 @@
+{
+  "name": "Pryluk-Lewin Real Estate Hub",
+  "short_name": "PL RE Hub",
+  "description": "Investment property analysis, refinance calculator, and portfolio management",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0C1017",
+  "theme_color": "#4F8CFF",
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
