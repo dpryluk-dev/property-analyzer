@@ -6,6 +6,12 @@ const PUBLIC_PATHS = ['/login', '/api/auth'];
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
+  // Skip auth entirely if credentials aren't configured
+  const authEnabled = process.env.AUTH_USERNAME && process.env.AUTH_PASSWORD;
+  if (!authEnabled) {
+    return NextResponse.next();
+  }
+
   // Allow public paths, static files, and manifest
   if (
     PUBLIC_PATHS.some(p => pathname.startsWith(p)) ||
