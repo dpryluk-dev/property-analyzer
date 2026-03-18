@@ -93,7 +93,7 @@ export function DealScout({ initialDeals, onPromoted }: DealScoutProps) {
       }}>
         <div>
           <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Boston Deal Scout</div>
-          <div style={{ fontSize: 12, color: C.dim, marginTop: 4 }}>Live Redfin listings &middot; Best investment deals in Greater Boston</div>
+          <div style={{ fontSize: 12, color: C.dim, marginTop: 4 }}>Live Redfin listings &middot; Best investment deals in Greater Boston &middot; Under $300K</div>
         </div>
         <button onClick={handleScout} disabled={isPending} style={{
           background: isPending ? C.border : `linear-gradient(135deg, ${C.green}, #2AA87A)`,

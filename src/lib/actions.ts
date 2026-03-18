@@ -101,7 +101,7 @@ export async function analyzeProperty(rawMls: string) {
 }
 
 export async function getPortfolio() {
-  return prisma.property.findMany({
+  const properties = await prisma.property.findMany({
     orderBy: { createdAt: 'desc' },
     include: {
       rentResearch: { include: { comps: true } },
@@ -109,6 +109,19 @@ export async function getPortfolio() {
       dealNotes: { orderBy: { createdAt: 'desc' } },
     },
   });
+
+  // Attach listing URLs from scouted deals that were promoted
+  const propertyIds = properties.map(p => p.id);
+  const scoutedDeals = await prisma.scoutedDeal.findMany({
+    where: { promotedId: { in: propertyIds } },
+    select: { promotedId: true, sourceUrl: true },
+  });
+  const urlMap = new Map(scoutedDeals.map(sd => [sd.promotedId, sd.sourceUrl]));
+
+  return properties.map(p => ({
+    ...p,
+    listingUrl: urlMap.get(p.id) || null,
+  }));
 }
 
 export async function deleteProperty(id: string) {
@@ -219,13 +232,9 @@ export async function runDealScout(): Promise<{ success: boolean; error?: string
 
   try {
     for (const d of deals) {
-      // Skip duplicates by address
+      // Skip duplicates — check ALL deals (including dismissed/promoted)
       const existing = await prisma.scoutedDeal.findFirst({
-        where: {
-          address: d.address,
-          dismissed: false,
-          promotedId: null,
-        },
+        where: { address: d.address },
       });
       if (existing) continue;
 

@@ -77,6 +77,12 @@ export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate, on
             </div>
             <div style={{ fontSize: 8, color: C.dim, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>NOI / $100K</div>
           </div>
+          {p.listingUrl && (
+            <a href={p.listingUrl} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()} style={{
+              background: 'transparent', color: C.accent, border: `1px solid ${C.accent}44`, borderRadius: 5,
+              padding: '3px 7px', fontSize: 10, textDecoration: 'none', fontWeight: 500, cursor: 'pointer',
+            }}>View</a>
+          )}
           <button onClick={e => { e.stopPropagation(); onRemove(); }} style={{ background: 'transparent', color: C.dim, border: `1px solid ${C.border}`, borderRadius: 5, padding: '3px 7px', fontSize: 10, cursor: 'pointer' }}>{'\u2715'}</button>
         </div>
       </div>
@@ -226,11 +232,21 @@ export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate, on
             </span>
           </div>
 
-          {/* Share Image */}
-          <button onClick={(e) => { e.stopPropagation(); generateShareImage(p, a, ap, ar, rd, rc); }}
-            style={{ marginTop: 10, width: '100%', padding: '10px 0', background: `linear-gradient(135deg, ${C.accent}, #3B6FD9)`, color: C.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
-            {'\uD83D\uDCF7'} Download Shareable Image
-          </button>
+          {/* Action buttons */}
+          <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+            {p.listingUrl && (
+              <a href={p.listingUrl} target="_blank" rel="noopener noreferrer" style={{
+                flex: 1, padding: '10px 0', background: C.surface, color: C.accent, border: `1px solid ${C.accent}44`,
+                borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer', textAlign: 'center', textDecoration: 'none',
+              }}>
+                View Listing
+              </a>
+            )}
+            <button onClick={(e) => { e.stopPropagation(); generateShareImage(p, a, ap, ar, rd, rc); }}
+              style={{ flex: 1, padding: '10px 0', background: `linear-gradient(135deg, ${C.accent}, #3B6FD9)`, color: C.white, border: 'none', borderRadius: 8, fontSize: 13, fontWeight: 600, cursor: 'pointer' }}>
+              {'\uD83D\uDCF7'} Download Shareable Image
+            </button>
+          </div>
 
           <div style={{ fontSize: 9, color: C.dim, marginTop: 6 }}>Analyzed {new Date(item.createdAt).toLocaleDateString()}</div>
         </div>
