@@ -135,3 +135,28 @@ model DealNote {
   text        String
   milestone   Boolean  @default(false)
 }
+
+model ScoutedDeal {
+  id          String   @id @default(cuid())
+  createdAt   DateTime @default(now())
+
+  address     String
+  city        String   @default("Boston")
+  state       String   @default("MA")
+  zip         String?
+  price       Float
+  bedrooms    Float    @default(0)
+  bathrooms   Float    @default(0)
+  sqft        Float    @default(0)
+  type        String   @default("Condo")
+  source      String?
+  sourceUrl   String?
+  highlight   String?
+  estimatedRent Float?
+  estimatedCap  Float?
+  dismissed   Boolean  @default(false)
+  promotedId  String?  // Property.id if promoted to portfolio
+
+  @@index([dismissed])
+  @@index([createdAt])
+}

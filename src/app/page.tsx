@@ -1,14 +1,19 @@
-import { getPortfolio } from '@/lib/actions';
+import { getPortfolio, getScoutedDeals } from '@/lib/actions';
 import { PropertyApp } from '@/components/PropertyApp';
+import { LogoutButton } from '@/components/LogoutButton';
 
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const portfolio = await getPortfolio();
+  const [portfolio, scoutedDeals] = await Promise.all([
+    getPortfolio(),
+    getScoutedDeals(),
+  ]);
 
   return (
     <main style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
-      <div style={{ textAlign: 'center', marginBottom: 16 }}>
+      <div style={{ textAlign: 'center', marginBottom: 16, position: 'relative' }}>
+        <LogoutButton />
         <div style={{ fontSize: 10, color: '#4F8CFF', textTransform: 'uppercase', letterSpacing: 3, fontWeight: 600 }}>
           Pryluk-Lewin
         </div>
@@ -20,7 +25,10 @@ export default async function Home() {
           Real Estate Hub
         </h1>
       </div>
-      <PropertyApp initialPortfolio={JSON.parse(JSON.stringify(portfolio))} />
+      <PropertyApp
+        initialPortfolio={JSON.parse(JSON.stringify(portfolio))}
+        initialScoutedDeals={JSON.parse(JSON.stringify(scoutedDeals))}
+      />
     </main>
   );
 }

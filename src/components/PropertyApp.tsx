@@ -8,16 +8,18 @@ import { RefinanceCalc } from './RefinanceCalc';
 import { Dashboard } from './Dashboard';
 import { DealTracker } from './DealTracker';
 import { ScenarioModeler } from './ScenarioModeler';
+import { DealScout } from './DealScout';
 
 interface PropertyAppProps {
   initialPortfolio: any[];
+  initialScoutedDeals?: any[];
 }
 
-export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
+export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: PropertyAppProps) {
   const [raw, setRaw] = useState('');
   const [portfolio, setPortfolio] = useState(initialPortfolio);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [tab, setTab] = useState<'analyze' | 'portfolio' | 'refinance' | 'dashboard' | 'deals' | 'scenarios'>(initialPortfolio.length > 0 ? 'portfolio' : 'analyze');
+  const [tab, setTab] = useState<'analyze' | 'portfolio' | 'refinance' | 'dashboard' | 'deals' | 'scenarios' | 'scout'>(initialPortfolio.length > 0 ? 'portfolio' : 'analyze');
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
   const [status, setStatus] = useState('');
@@ -81,6 +83,7 @@ export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
           { id: 'dashboard' as const, label: 'Dashboard' },
           { id: 'deals' as const, label: 'Deals' },
           { id: 'scenarios' as const, label: 'Scenarios' },
+          { id: 'scout' as const, label: `Scout${initialScoutedDeals.length ? ` (${initialScoutedDeals.length})` : ''}` },
         ]).map(t => (
           <button key={t.id} onClick={() => setTab(t.id)} style={{
             flex: 'none', padding: '9px 14px', fontSize: 13, fontWeight: 600, border: 'none', borderRadius: 6,
@@ -220,6 +223,13 @@ export function PropertyApp({ initialPortfolio }: PropertyAppProps) {
       {tab === 'scenarios' && (
         <div className="fade-in">
           <ScenarioModeler portfolio={portfolio} />
+        </div>
+      )}
+
+      {/* Scout Tab */}
+      {tab === 'scout' && (
+        <div className="fade-in">
+          <DealScout initialDeals={initialScoutedDeals} onPromoted={refreshPortfolio} />
         </div>
       )}
 

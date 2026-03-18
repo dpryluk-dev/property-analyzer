@@ -4,6 +4,7 @@ import prisma from '@/lib/db';
 import { parseMLS } from '@/lib/parser';
 import { analyze } from '@/lib/analysis';
 import { researchRent } from '@/lib/rent-research';
+import { scoutBostonDeals } from '@/lib/deal-scout';
 
 export async function analyzeProperty(rawMls: string) {
   const parsed = parseMLS(rawMls);
@@ -194,4 +195,88 @@ export async function updatePurchaseInfo(propertyId: string, purchasePrice: numb
     },
   });
   return getPortfolio();
+}
+
+// --- Scouted Deals ---
+
+export async function runDealScout() {
+  const deals = await scoutBostonDeals();
+
+  const created = [];
+  for (const d of deals) {
+    // Skip duplicates by address (case-insensitive)
+    const existing = await prisma.scoutedDeal.findFirst({
+      where: {
+        address: { equals: d.address, mode: 'insensitive' },
+        dismissed: false,
+        promotedId: null,
+      },
+    });
+    if (existing) continue;
+
+    const deal = await prisma.scoutedDeal.create({
+      data: {
+        address: d.address || 'Unknown',
+        city: d.city || 'Boston',
+        state: d.state || 'MA',
+        zip: d.zip || null,
+        price: d.price || 0,
+        bedrooms: d.bedrooms || 0,
+        bathrooms: d.bathrooms || 0,
+        sqft: d.sqft || 0,
+        type: d.type || 'Condo',
+        source: d.source || null,
+        sourceUrl: d.sourceUrl || null,
+        highlight: d.highlight || null,
+        estimatedRent: d.estimatedRent || null,
+        estimatedCap: d.estimatedCap || null,
+      },
+    });
+    created.push(deal);
+  }
+
+  return created;
+}
+
+export async function getScoutedDeals() {
+  return prisma.scoutedDeal.findMany({
+    where: { dismissed: false, promotedId: null },
+    orderBy: [{ estimatedCap: 'desc' }, { createdAt: 'desc' }],
+  });
+}
+
+export async function dismissScoutedDeal(id: string) {
+  await prisma.scoutedDeal.update({
+    where: { id },
+    data: { dismissed: true },
+  });
+  return getScoutedDeals();
+}
+
+export async function promoteScoutedDeal(id: string) {
+  const deal = await prisma.scoutedDeal.findUnique({ where: { id } });
+  if (!deal) throw new Error('Scouted deal not found');
+
+  // Build a synthetic MLS-like text so the analyzer can process it
+  const syntheticMls = [
+    `List Price: $${deal.price.toLocaleString()}`,
+    `Address: ${deal.address}`,
+    deal.city ? `City: ${deal.city}` : '',
+    deal.state ? `State: ${deal.state}` : '',
+    deal.zip ? `Zip: ${deal.zip}` : '',
+    `Type: ${deal.type}`,
+    deal.bedrooms ? `Bedrooms: ${deal.bedrooms}` : '',
+    deal.bathrooms ? `Bathrooms: ${deal.bathrooms}` : '',
+    deal.sqft ? `Sqft: ${deal.sqft}` : '',
+  ].filter(Boolean).join('\n');
+
+  const result = await analyzeProperty(syntheticMls);
+
+  // Mark scouted deal as promoted
+  await prisma.scoutedDeal.update({
+    where: { id },
+    data: { promotedId: result.id },
+  });
+
+  return { property: result, scoutedDeals: await getScoutedDeals() };
 }
