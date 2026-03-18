@@ -4,10 +4,20 @@ import { PropertyApp } from '@/components/PropertyApp';
 export const dynamic = 'force-dynamic';
 
 export default async function Home() {
-  const [portfolio, scoutedDeals] = await Promise.all([
-    getPortfolio(),
-    getScoutedDeals(),
-  ]);
+  let portfolio: Awaited<ReturnType<typeof getPortfolio>> = [];
+  let scoutedDeals: Awaited<ReturnType<typeof getScoutedDeals>> = [];
+
+  try {
+    portfolio = await getPortfolio();
+  } catch (e) {
+    console.error('Failed to load portfolio:', e);
+  }
+
+  try {
+    scoutedDeals = await getScoutedDeals();
+  } catch (e) {
+    console.error('Failed to load scouted deals:', e);
+  }
 
   return (
     <main style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
