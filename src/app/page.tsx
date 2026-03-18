@@ -1,6 +1,5 @@
 import { getPortfolio, getScoutedDeals } from '@/lib/actions';
 import { PropertyApp } from '@/components/PropertyApp';
-import { LogoutButton } from '@/components/LogoutButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -12,8 +11,7 @@ export default async function Home() {
 
   return (
     <main style={{ maxWidth: 960, margin: '0 auto', padding: '24px 16px' }}>
-      <div style={{ textAlign: 'center', marginBottom: 16, position: 'relative' }}>
-        <LogoutButton />
+      <div style={{ textAlign: 'center', marginBottom: 16 }}>
         <div style={{ fontSize: 10, color: '#4F8CFF', textTransform: 'uppercase', letterSpacing: 3, fontWeight: 600 }}>
           Pryluk-Lewin
         </div>
