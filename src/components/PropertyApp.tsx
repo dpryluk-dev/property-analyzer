@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useTransition, useCallback } from 'react';
-import { analyzeProperty, deleteProperty, updateAdjustments, getPortfolio } from '@/lib/actions';
+import { analyzeProperty, deleteProperty, updateAdjustments, renameProperty, getPortfolio } from '@/lib/actions';
 import { analyze } from '@/lib/analysis';
 import { theme as C, fmt, pct, ratingColor } from '@/lib/theme';
 import { PortfolioCard } from './PortfolioCard';
@@ -57,6 +57,13 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
   const handleUpdate = useCallback(async (id: string, adjPrice: number, adjRent: number) => {
     startTransition(async () => {
       const updated = await updateAdjustments(id, adjPrice, adjRent);
+      setPortfolio(JSON.parse(JSON.stringify(updated)));
+    });
+  }, []);
+
+  const handleRename = useCallback(async (id: string, name: string) => {
+    startTransition(async () => {
+      const updated = await renameProperty(id, name);
       setPortfolio(JSON.parse(JSON.stringify(updated)));
     });
   }, []);
@@ -214,6 +221,7 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
               onExpand={() => setExpandedId(expandedId === item.id ? null : item.id)}
               onRemove={() => handleDelete(item.id)}
               onUpdate={handleUpdate}
+              onRename={handleRename}
             />
           ))}
         </div>

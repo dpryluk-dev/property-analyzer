@@ -20,7 +20,12 @@ export function DealScout({ initialDeals, onPromoted }: DealScoutProps) {
     setStatus('Searching Boston listings...');
     startTransition(async () => {
       try {
-        await runDealScout();
+        const result = await runDealScout();
+        if (!result.success) {
+          setError(result.error || 'Scout search failed');
+          setStatus('');
+          return;
+        }
         const updated = await getScoutedDeals();
         setDeals(JSON.parse(JSON.stringify(updated)));
         setStatus('');
@@ -43,7 +48,12 @@ export function DealScout({ initialDeals, onPromoted }: DealScoutProps) {
     startTransition(async () => {
       try {
         const result = await promoteScoutedDeal(id);
-        setDeals(JSON.parse(JSON.stringify(result.scoutedDeals)));
+        if (!result.success) {
+          setError(result.error || 'Failed to promote deal');
+          setStatus('');
+          return;
+        }
+        setDeals(JSON.parse(JSON.stringify(result.scoutedDeals || [])));
         // Trigger parent to refresh portfolio
         const { getPortfolio } = await import('@/lib/actions');
         const portfolio = await getPortfolio();

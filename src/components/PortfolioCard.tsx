@@ -11,12 +11,15 @@ interface PortfolioCardProps {
   onExpand: () => void;
   onRemove: () => void;
   onUpdate: (id: string, adjPrice: number, adjRent: number) => void;
+  onRename: (id: string, name: string) => void;
 }
 
-export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate }: PortfolioCardProps) {
+export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate, onRename }: PortfolioCardProps) {
   const p = item;
   const [ap, setAp] = useState(item.adjPrice || item.listPrice);
   const [ar, setAr] = useState(item.adjRent || item.rentResearch?.rent || 0);
+  const [editingName, setEditingName] = useState(false);
+  const [name, setName] = useState(item.address || '');
   const rd = item.rentResearch;
 
   // Live recompute with local state
@@ -33,7 +36,24 @@ export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate }: 
       <div onClick={onExpand} style={{ padding: '12px 14px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <div style={{ width: 8, height: 8, borderRadius: '50%', background: rc, flexShrink: 0 }} />
         <div style={{ flex: 1, minWidth: 140 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: C.white }}>{p.address || '?'}</div>
+          {editingName ? (
+            <input
+              autoFocus
+              value={name}
+              onChange={e => setName(e.target.value)}
+              onBlur={() => { setEditingName(false); if (name.trim() && name !== item.address) onRename(item.id, name); }}
+              onKeyDown={e => { if (e.key === 'Enter') { setEditingName(false); if (name.trim() && name !== item.address) onRename(item.id, name); } if (e.key === 'Escape') { setName(item.address); setEditingName(false); } }}
+              onClick={e => e.stopPropagation()}
+              className="mono"
+              style={{ fontSize: 13, fontWeight: 600, color: C.white, background: C.bg, border: `1px solid ${C.accent}`, borderRadius: 4, padding: '2px 6px', outline: 'none', width: '100%' }}
+            />
+          ) : (
+            <div
+              onClick={e => { e.stopPropagation(); setEditingName(true); }}
+              title="Click to rename"
+              style={{ fontSize: 13, fontWeight: 600, color: C.white, cursor: 'text', borderBottom: `1px dashed ${C.border}`, display: 'inline-block' }}
+            >{name || '?'}</div>
+          )}
           <div style={{ fontSize: 10, color: C.dim }}>
             {[p.city, p.state, p.zip].filter(Boolean).join(', ')} | {p.bedrooms}BD/{p.bathrooms}BA{p.sqft ? ` | ${p.sqft}sf` : ''}
           </div>

@@ -115,6 +115,12 @@ export async function deleteProperty(id: string) {
   await prisma.property.delete({ where: { id } });
 }
 
+export async function renameProperty(id: string, name: string) {
+  'use server';
+  await prisma.property.update({ where: { id }, data: { address: name.trim() } });
+  return getPortfolio();
+}
+
 export async function updateAdjustments(id: string, adjPrice: number, adjRent: number) {
   // Fetch property to recompute analysis
   const property = await prisma.property.findUnique({ where: { id } });
@@ -199,43 +205,53 @@ export async function updatePurchaseInfo(propertyId: string, purchasePrice: numb
 
 // --- Scouted Deals ---
 
-export async function runDealScout() {
-  const deals = await scoutBostonDeals();
-
-  const created = [];
-  for (const d of deals) {
-    // Skip duplicates by address (case-insensitive)
-    const existing = await prisma.scoutedDeal.findFirst({
-      where: {
-        address: { equals: d.address, mode: 'insensitive' },
-        dismissed: false,
-        promotedId: null,
-      },
-    });
-    if (existing) continue;
-
-    const deal = await prisma.scoutedDeal.create({
-      data: {
-        address: d.address || 'Unknown',
-        city: d.city || 'Boston',
-        state: d.state || 'MA',
-        zip: d.zip || null,
-        price: d.price || 0,
-        bedrooms: d.bedrooms || 0,
-        bathrooms: d.bathrooms || 0,
-        sqft: d.sqft || 0,
-        type: d.type || 'Condo',
-        source: d.source || null,
-        sourceUrl: d.sourceUrl || null,
-        highlight: d.highlight || null,
-        estimatedRent: d.estimatedRent || null,
-        estimatedCap: d.estimatedCap || null,
-      },
-    });
-    created.push(deal);
+export async function runDealScout(): Promise<{ success: boolean; error?: string }> {
+  let deals;
+  try {
+    deals = await scoutBostonDeals();
+  } catch (e: any) {
+    const msg = e?.message || String(e);
+    if (msg.includes('credit') || msg.includes('balance') || msg.includes('billing')) {
+      return { success: false, error: 'Anthropic API credits exhausted. Please add credits at console.anthropic.com to use the Deal Scout.' };
+    }
+    return { success: false, error: `Deal scout failed: ${msg}` };
   }
 
-  return created;
+  try {
+    for (const d of deals) {
+      // Skip duplicates by address (case-insensitive)
+      const existing = await prisma.scoutedDeal.findFirst({
+        where: {
+          address: { equals: d.address, mode: 'insensitive' },
+          dismissed: false,
+          promotedId: null,
+        },
+      });
+      if (existing) continue;
+
+      await prisma.scoutedDeal.create({
+        data: {
+          address: d.address || 'Unknown',
+          city: d.city || 'Boston',
+          state: d.state || 'MA',
+          zip: d.zip || null,
+          price: d.price || 0,
+          bedrooms: d.bedrooms || 0,
+          bathrooms: d.bathrooms || 0,
+          sqft: d.sqft || 0,
+          type: d.type || 'Condo',
+          source: d.source || null,
+          sourceUrl: d.sourceUrl || null,
+          highlight: d.highlight || null,
+          estimatedRent: d.estimatedRent || null,
+          estimatedCap: d.estimatedCap || null,
+        },
+      });
+    }
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: `Failed to save deals: ${e?.message || String(e)}` };
+  }
 }
 
 export async function getScoutedDeals() {
@@ -257,9 +273,9 @@ export async function dismissScoutedDeal(id: string) {
   return getScoutedDeals();
 }
 
-export async function promoteScoutedDeal(id: string) {
+export async function promoteScoutedDeal(id: string): Promise<{ success: boolean; error?: string; property?: any; scoutedDeals?: any[] }> {
   const deal = await prisma.scoutedDeal.findUnique({ where: { id } });
-  if (!deal) throw new Error('Scouted deal not found');
+  if (!deal) return { success: false, error: 'Scouted deal not found' };
 
   // Build a synthetic MLS-like text so the analyzer can process it
   const syntheticMls = [
@@ -274,7 +290,16 @@ export async function promoteScoutedDeal(id: string) {
     deal.sqft ? `Sqft: ${deal.sqft}` : '',
   ].filter(Boolean).join('\n');
 
-  const result = await analyzeProperty(syntheticMls);
+  let result;
+  try {
+    result = await analyzeProperty(syntheticMls);
+  } catch (e: any) {
+    const msg = e?.message || String(e);
+    if (msg.includes('credit') || msg.includes('balance') || msg.includes('billing')) {
+      return { success: false, error: 'Anthropic API credits exhausted. Please add credits at console.anthropic.com.' };
+    }
+    return { success: false, error: `Analysis failed: ${msg}` };
+  }
 
   // Mark scouted deal as promoted
   await prisma.scoutedDeal.update({
@@ -282,5 +307,5 @@ export async function promoteScoutedDeal(id: string) {
     data: { promotedId: result.id },
   });
 
-  return { property: result, scoutedDeals: await getScoutedDeals() };
+  return { success: true, property: result, scoutedDeals: await getScoutedDeals() };
 }
