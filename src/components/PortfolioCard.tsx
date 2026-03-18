@@ -44,14 +44,19 @@ export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate }: 
             <div style={{ fontSize: 9, color: C.dim }}>Price</div>
           </div>
           <div style={{ textAlign: 'right' }}>
-            <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: a.netMo >= 0 ? C.green : C.red }}>{fmt(a.netMo)}/mo</div>
-            <div style={{ fontSize: 9, color: C.dim }}>Net</div>
+            <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: a.noiAnnual >= 0 ? C.green : C.red }}>{fmt(a.noiAnnual)}</div>
+            <div style={{ fontSize: 9, color: C.dim }}>NOI/yr</div>
           </div>
-          <div style={{ textAlign: 'right' }}>
-            <div className="mono" style={{ fontSize: 13, fontWeight: 700, color: rc }}>{pct(a.capRate)}</div>
-            <div style={{ fontSize: 9, color: C.dim }}>Cap</div>
+          <div style={{
+            textAlign: 'center', padding: '4px 10px', borderRadius: 8,
+            background: `linear-gradient(135deg, ${a.noiPer100k >= 5000 ? C.green : a.noiPer100k >= 3500 ? C.yellow : C.red}18, ${a.noiPer100k >= 5000 ? C.green : a.noiPer100k >= 3500 ? C.yellow : C.red}08)`,
+            border: `1px solid ${a.noiPer100k >= 5000 ? C.green : a.noiPer100k >= 3500 ? C.yellow : C.red}44`,
+          }}>
+            <div className="mono" style={{ fontSize: 14, fontWeight: 800, color: a.noiPer100k >= 5000 ? C.green : a.noiPer100k >= 3500 ? C.yellow : C.red }}>
+              {fmt(Math.round(a.noiPer100k))}
+            </div>
+            <div style={{ fontSize: 8, color: C.dim, fontWeight: 600, textTransform: 'uppercase', letterSpacing: 0.5 }}>NOI / $100K</div>
           </div>
-          <span style={{ display: 'inline-block', padding: '2px 7px', borderRadius: 5, background: rc + '15', color: rc, fontSize: 10, fontWeight: 600 }}>{a.rating}</span>
           <button onClick={e => { e.stopPropagation(); onRemove(); }} style={{ background: 'transparent', color: C.dim, border: `1px solid ${C.border}`, borderRadius: 5, padding: '3px 7px', fontSize: 10, cursor: 'pointer' }}>{'\u2715'}</button>
         </div>
       </div>
@@ -90,7 +95,8 @@ export function PortfolioCard({ item, expanded, onExpand, onRemove, onUpdate }: 
               { label: 'Price', value: fmt(ap), hi: true },
               { label: 'Rent', value: fmt(ar) + '/mo', sub: rd ? `${fmt(rd.low)}-${fmt(rd.high)}` : '' },
               { label: 'Expenses', value: fmt(a.totalExpMo) + '/mo', sub: `${a.expRatio.toFixed(0)}% of rent` },
-              { label: 'Net Cash Flow', value: fmt(a.netMo) + '/mo', sub: `${fmt(a.netMo * 12)}/yr`, hi: true },
+              { label: 'NOI', value: fmt(a.noiAnnual) + '/yr', sub: `${fmt(a.netMo)}/mo`, hi: true },
+              { label: 'NOI / $100K', value: fmt(Math.round(a.noiPer100k)), sub: 'North Star metric', hi: true },
             ].map((m, i) => (
               <div key={i} style={{ background: C.card, borderRadius: 10, padding: '14px 11px', border: `1px solid ${m.hi ? C.borderHi : C.border}` }}>
                 <div style={{ fontSize: 9, color: C.dim, textTransform: 'uppercase', fontWeight: 600, marginBottom: 2 }}>{m.label}</div>

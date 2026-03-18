@@ -24,6 +24,8 @@ export interface AnalysisResult {
   observations: ObservationItem[];
   priceSqft: number;
   rentSqft: number;
+  noiAnnual: number;
+  noiPer100k: number;
 }
 
 export function analyze(p: ParsedProperty, rentMo: number, priceOverride?: number): AnalysisResult {
@@ -77,9 +79,14 @@ export function analyze(p: ParsedProperty, rentMo: number, priceOverride?: numbe
   if (p.assessed && price < p.assessed) observations.push({ color: 'green', icon: '+', text: `Below assessed ($${p.assessed.toLocaleString()}).` });
   if (expRatio > 70) observations.push({ color: 'red', icon: '!', text: `${expRatio.toFixed(0)}% expense ratio.` });
 
+  const noiAnnual = netMo * 12;
+  const noiPer100k = price > 0 ? (noiAnnual / (price / 100000)) : 0;
+
   return {
     expenses, totalExpMo, netMo, capRate, expRatio, grm, breakMo, rating, observations,
     priceSqft: p.sqft > 0 ? price / p.sqft : 0,
     rentSqft: p.sqft > 0 ? rentMo / p.sqft : 0,
+    noiAnnual,
+    noiPer100k,
   };
 }

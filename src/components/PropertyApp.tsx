@@ -2,6 +2,7 @@
 
 import { useState, useTransition, useCallback } from 'react';
 import { analyzeProperty, deleteProperty, updateAdjustments, getPortfolio } from '@/lib/actions';
+import { analyze } from '@/lib/analysis';
 import { theme as C, fmt, pct, ratingColor } from '@/lib/theme';
 import { PortfolioCard } from './PortfolioCard';
 import { RefinanceCalc } from './RefinanceCalc';
@@ -66,6 +67,15 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
 
   const avgCap = portfolio.length > 0
     ? portfolio.reduce((s: number, p: any) => s + (p.analysis?.capRate || 0), 0) / portfolio.length
+    : 0;
+
+  const avgNoiPer100k = portfolio.length > 0
+    ? portfolio.reduce((s: number, p: any) => {
+        const price = p.adjPrice || p.listPrice || 0;
+        const rent = p.adjRent || p.rentResearch?.rent || 0;
+        const a = analyze(p as any, rent, price);
+        return s + a.noiPer100k;
+      }, 0) / portfolio.length
     : 0;
 
   const best = portfolio.length > 0
@@ -167,6 +177,17 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
                   fontSize: 18, fontWeight: 700,
                   color: avgCap >= 5 ? C.green : avgCap >= 3.5 ? C.yellow : C.red,
                 }}>{pct(avgCap)}</div>
+              </div>
+              <div style={{
+                textAlign: 'center', padding: '6px 14px', borderRadius: 8,
+                background: `linear-gradient(135deg, ${avgNoiPer100k >= 5000 ? C.green : avgNoiPer100k >= 3500 ? C.yellow : C.red}18, transparent)`,
+                border: `1px solid ${avgNoiPer100k >= 5000 ? C.green : avgNoiPer100k >= 3500 ? C.yellow : C.red}44`,
+              }}>
+                <div style={{ fontSize: 8, color: C.dim, textTransform: 'uppercase', fontWeight: 600, letterSpacing: 0.5 }}>NOI / $100K</div>
+                <div className="mono" style={{
+                  fontSize: 20, fontWeight: 800,
+                  color: avgNoiPer100k >= 5000 ? C.green : avgNoiPer100k >= 3500 ? C.yellow : C.red,
+                }}>{fmt(Math.round(avgNoiPer100k))}</div>
               </div>
               {best && (
                 <div style={{ textAlign: 'center' }}>
