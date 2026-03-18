@@ -219,10 +219,10 @@ export async function runDealScout(): Promise<{ success: boolean; error?: string
 
   try {
     for (const d of deals) {
-      // Skip duplicates by address (case-insensitive)
+      // Skip duplicates by address
       const existing = await prisma.scoutedDeal.findFirst({
         where: {
-          address: { equals: d.address, mode: 'insensitive' },
+          address: d.address,
           dismissed: false,
           promotedId: null,
         },
