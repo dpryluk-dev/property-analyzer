@@ -239,10 +239,14 @@ export async function runDealScout() {
 }
 
 export async function getScoutedDeals() {
-  return prisma.scoutedDeal.findMany({
-    where: { dismissed: false, promotedId: null },
-    orderBy: [{ estimatedCap: 'desc' }, { createdAt: 'desc' }],
-  });
+  try {
+    return await prisma.scoutedDeal.findMany({
+      where: { dismissed: false, promotedId: null },
+      orderBy: { createdAt: 'desc' },
+    });
+  } catch {
+    return [];
+  }
 }
 
 export async function dismissScoutedDeal(id: string) {
