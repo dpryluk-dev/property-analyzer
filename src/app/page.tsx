@@ -34,8 +34,8 @@ export default async function Home() {
         </h1>
       </div>
       <PropertyApp
-        initialPortfolio={JSON.parse(JSON.stringify(portfolio))}
-        initialScoutedDeals={JSON.parse(JSON.stringify(scoutedDeals))}
+        initialPortfolio={portfolio}
+        initialScoutedDeals={scoutedDeals}
       />
     </main>
   );

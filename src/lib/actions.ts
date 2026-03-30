@@ -20,6 +20,11 @@ export async function analyzeProperty(rawMls: string) {
   const result = analyze(parsed, rentData.rent, parsed.listPrice);
 
   // Save to DB
+  // Ensure rent values are valid numbers
+  const safeRent = typeof rentData.rent === 'number' && isFinite(rentData.rent) ? rentData.rent : 0;
+  const safeLow = typeof rentData.low === 'number' && isFinite(rentData.low) ? rentData.low : 0;
+  const safeHigh = typeof rentData.high === 'number' && isFinite(rentData.high) ? rentData.high : 0;
+
   const property = await prisma.property.create({
     data: {
       mlsId: parsed.mlsId || null,
@@ -43,20 +48,20 @@ export async function analyzeProperty(rawMls: string) {
       dom: parsed.dom,
       rawMls: rawMls.substring(0, 50000), // cap storage
       adjPrice: parsed.listPrice,
-      adjRent: rentData.rent,
+      adjRent: safeRent,
 
       rentResearch: {
         create: {
-          rent: rentData.rent,
-          low: rentData.low,
-          high: rentData.high,
-          confidence: rentData.confidence,
+          rent: safeRent,
+          low: safeLow,
+          high: safeHigh,
+          confidence: rentData.confidence || 'Low',
           methodology: rentData.methodology || null,
           comps: {
-            create: (rentData.comps || []).map(c => ({
-              address: c.address,
-              rent: c.rent,
-              note: c.note || null,
+            create: (Array.isArray(rentData.comps) ? rentData.comps : []).map(c => ({
+              address: String(c.address || 'Unknown'),
+              rent: typeof c.rent === 'number' && isFinite(c.rent) ? c.rent : 0,
+              note: c.note ? String(c.note) : null,
             })),
           },
         },
@@ -65,7 +70,7 @@ export async function analyzeProperty(rawMls: string) {
       analysis: {
         create: {
           priceUsed: parsed.listPrice,
-          rentUsed: rentData.rent,
+          rentUsed: safeRent,
           totalExpMo: result.totalExpMo,
           netMo: result.netMo,
           capRate: result.capRate,
@@ -97,7 +102,8 @@ export async function analyzeProperty(rawMls: string) {
     },
   });
 
-  return property;
+  // Serialize to plain JSON to avoid Date/Prisma serialization issues with server actions
+  return JSON.parse(JSON.stringify(property));
 }
 
 export async function getPortfolio() {
@@ -118,10 +124,16 @@ export async function getPortfolio() {
   });
   const urlMap = new Map(scoutedDeals.map(sd => [sd.promotedId, sd.sourceUrl]));
 
-  return properties.map(p => ({
-    ...p,
-    listingUrl: urlMap.get(p.id) || null,
-  }));
+  const result = properties.map(p => {
+    const { rawMls, ...rest } = p; // exclude rawMls — not needed on client, reduces payload
+    return {
+      ...rest,
+      listingUrl: urlMap.get(p.id) || null,
+    };
+  });
+
+  // Serialize to plain JSON to avoid Date/Prisma serialization issues with server actions
+  return JSON.parse(JSON.stringify(result));
 }
 
 export async function deleteProperty(id: string) {
@@ -265,10 +277,11 @@ export async function runDealScout(): Promise<{ success: boolean; error?: string
 
 export async function getScoutedDeals() {
   try {
-    return await prisma.scoutedDeal.findMany({
+    const deals = await prisma.scoutedDeal.findMany({
       where: { dismissed: false, promotedId: null },
       orderBy: { createdAt: 'desc' },
     });
+    return JSON.parse(JSON.stringify(deals));
   } catch {
     return [];
   }

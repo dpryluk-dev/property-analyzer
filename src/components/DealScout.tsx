@@ -45,7 +45,7 @@ export function DealScout({ initialDeals, onPromoted }: DealScoutProps) {
           return;
         }
         const updated = await getScoutedDeals();
-        setDeals(JSON.parse(JSON.stringify(updated)));
+        setDeals(updated);
         setStatus('');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Scout search failed');
@@ -57,7 +57,7 @@ export function DealScout({ initialDeals, onPromoted }: DealScoutProps) {
   function handleDismiss(id: string) {
     startTransition(async () => {
       const updated = await dismissScoutedDeal(id);
-      setDeals(JSON.parse(JSON.stringify(updated)));
+      setDeals(updated);
     });
   }
 
@@ -71,10 +71,10 @@ export function DealScout({ initialDeals, onPromoted }: DealScoutProps) {
           setStatus('');
           return;
         }
-        setDeals(JSON.parse(JSON.stringify(result.scoutedDeals || [])));
+        setDeals(result.scoutedDeals || []);
         const { getPortfolio } = await import('@/lib/actions');
         const portfolio = await getPortfolio();
-        onPromoted(JSON.parse(JSON.stringify(portfolio)));
+        onPromoted(portfolio);
         setStatus('');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Failed to promote deal');

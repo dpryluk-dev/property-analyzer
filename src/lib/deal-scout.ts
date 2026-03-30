@@ -175,7 +175,8 @@ async function fetchRedfinZip(zip: string): Promise<ScoutedDealResult[]> {
     if (!response.ok) return deals;
 
     const text = await response.text();
-    const jsonText = text.replace(/^{}&&/, '');
+    const jsonText = text.replace(/^{}&&/, '').trim();
+    if (!jsonText) return deals;
     const data = JSON.parse(jsonText);
     const homes = data?.payload?.homes || [];
 

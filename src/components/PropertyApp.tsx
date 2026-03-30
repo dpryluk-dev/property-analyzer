@@ -33,7 +33,7 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
       try {
         const result = await analyzeProperty(raw);
         const updated = await getPortfolio();
-        setPortfolio(JSON.parse(JSON.stringify(updated)));
+        setPortfolio(updated);
         setExpandedId(result.id);
         setTab('portfolio');
         setRaw('');
@@ -49,7 +49,7 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
     startTransition(async () => {
       await deleteProperty(id);
       const updated = await getPortfolio();
-      setPortfolio(JSON.parse(JSON.stringify(updated)));
+      setPortfolio(updated);
       if (expandedId === id) setExpandedId(null);
     });
   }, [expandedId]);
@@ -57,19 +57,19 @@ export function PropertyApp({ initialPortfolio, initialScoutedDeals = [] }: Prop
   const handleUpdate = useCallback(async (id: string, adjPrice: number, adjRent: number) => {
     startTransition(async () => {
       const updated = await updateAdjustments(id, adjPrice, adjRent);
-      setPortfolio(JSON.parse(JSON.stringify(updated)));
+      setPortfolio(updated);
     });
   }, []);
 
   const handleRename = useCallback(async (id: string, name: string) => {
     startTransition(async () => {
       const updated = await renameProperty(id, name);
-      setPortfolio(JSON.parse(JSON.stringify(updated)));
+      setPortfolio(updated);
     });
   }, []);
 
   const refreshPortfolio = useCallback(async (updated: any[]) => {
-    setPortfolio(JSON.parse(JSON.stringify(updated)));
+    setPortfolio(updated);
   }, []);
 
   const avgCap = portfolio.length > 0
