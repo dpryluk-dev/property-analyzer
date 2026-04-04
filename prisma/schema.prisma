@@ -36,6 +36,9 @@ model Property {
   // Raw MLS text (for re-parsing)
   rawMls      String?
 
+  // Listing URL (from email imports, scouted deals, etc.)
+  listingUrl  String?
+
   // User adjustments
   adjPrice    Float?
   adjRent     Float?

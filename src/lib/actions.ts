@@ -5,6 +5,7 @@ import { parseMLS } from '@/lib/parser';
 import { analyze } from '@/lib/analysis';
 import { researchRent } from '@/lib/rent-research';
 import { scoutBostonDeals } from '@/lib/deal-scout';
+import { parseListingEmail, type EmailListing } from '@/lib/email-listing-parser';
 
 export async function analyzeProperty(rawMls: string) {
   const parsed = parseMLS(rawMls);
@@ -128,7 +129,7 @@ export async function getPortfolio() {
     const { rawMls, ...rest } = p; // exclude rawMls — not needed on client, reduces payload
     return {
       ...rest,
-      listingUrl: urlMap.get(p.id) || null,
+      listingUrl: p.listingUrl || urlMap.get(p.id) || null,
     };
   });
 
@@ -293,6 +294,133 @@ export async function dismissScoutedDeal(id: string) {
     data: { dismissed: true },
   });
   return getScoutedDeals();
+}
+
+// --- Email Listing Import ---
+
+export async function importListingsFromEmail(emailBody: string): Promise<{
+  success: boolean;
+  imported: number;
+  skipped: number;
+  errors: string[];
+  properties: any[];
+}> {
+  const listings = parseListingEmail(emailBody);
+  const results: any[] = [];
+  const errors: string[] = [];
+  let skipped = 0;
+
+  for (const listing of listings) {
+    // Skip if we already have this address
+    const existing = await prisma.property.findFirst({
+      where: { address: listing.address },
+    });
+    if (existing) {
+      // If existing property doesn't have a listingUrl, update it
+      if (!existing.listingUrl && listing.listingUrl) {
+        await prisma.property.update({
+          where: { id: existing.id },
+          data: { listingUrl: listing.listingUrl },
+        });
+      }
+      skipped++;
+      continue;
+    }
+
+    // Build synthetic MLS text for the analyzer
+    const syntheticMls = [
+      `List Price: $${listing.price.toLocaleString()}`,
+      `Address: ${listing.address}`,
+      listing.city ? `City: ${listing.city}` : '',
+      listing.state ? `State: ${listing.state}` : '',
+      listing.zip ? `Zip: ${listing.zip}` : '',
+      `Type: ${listing.type}`,
+      listing.bedrooms ? `Bedrooms: ${listing.bedrooms}` : '',
+      listing.bathrooms ? `Bathrooms: ${listing.bathrooms}` : '',
+      listing.sqft ? `Sqft: ${listing.sqft}` : '',
+    ].filter(Boolean).join('\n');
+
+    try {
+      const property = await analyzeProperty(syntheticMls);
+
+      // Attach listing URL
+      if (listing.listingUrl) {
+        await prisma.property.update({
+          where: { id: property.id },
+          data: { listingUrl: listing.listingUrl },
+        });
+        property.listingUrl = listing.listingUrl;
+      }
+
+      results.push(property);
+    } catch (e: any) {
+      errors.push(`${listing.address}: ${e?.message || String(e)}`);
+    }
+  }
+
+  return {
+    success: errors.length === 0,
+    imported: results.length,
+    skipped,
+    errors,
+    properties: results,
+  };
+}
+
+export async function importSingleListing(listing: {
+  address: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  price: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  sqft?: number;
+  type?: string;
+  listingUrl?: string;
+  source?: string;
+}): Promise<{ success: boolean; error?: string; property?: any }> {
+  // Check for duplicates
+  const existing = await prisma.property.findFirst({
+    where: { address: listing.address },
+  });
+  if (existing) {
+    if (!existing.listingUrl && listing.listingUrl) {
+      await prisma.property.update({
+        where: { id: existing.id },
+        data: { listingUrl: listing.listingUrl },
+      });
+    }
+    return { success: true, error: 'Property already exists', property: existing };
+  }
+
+  const syntheticMls = [
+    `List Price: $${listing.price.toLocaleString()}`,
+    `Address: ${listing.address}`,
+    listing.city ? `City: ${listing.city}` : '',
+    listing.state ? `State: ${listing.state}` : '',
+    listing.zip ? `Zip: ${listing.zip}` : '',
+    `Type: ${listing.type || 'Condo'}`,
+    listing.bedrooms ? `Bedrooms: ${listing.bedrooms}` : '',
+    listing.bathrooms ? `Bathrooms: ${listing.bathrooms}` : '',
+    listing.sqft ? `Sqft: ${listing.sqft}` : '',
+  ].filter(Boolean).join('\n');
+
+  try {
+    const property = await analyzeProperty(syntheticMls);
+
+    if (listing.listingUrl) {
+      await prisma.property.update({
+        where: { id: property.id },
+        data: { listingUrl: listing.listingUrl },
+      });
+      property.listingUrl = listing.listingUrl;
+    }
+
+    return { success: true, property };
+  } catch (e: any) {
+    return { success: false, error: e?.message || String(e) };
+  }
 }
 
 export async function promoteScoutedDeal(id: string): Promise<{ success: boolean; error?: string; property?: any; scoutedDeals?: any[] }> {
