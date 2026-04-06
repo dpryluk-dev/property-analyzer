@@ -33,6 +33,10 @@ loadEnvFile(path.resolve('.env.local'));
 loadEnvFile(path.resolve('.env'));
 
 import { extractListingUrls } from '../src/lib/email-listing-parser';
+import { researchRent } from '../src/lib/rent-research';
+import { analyze } from '../src/lib/analysis';
+import type { ParsedProperty } from '../src/lib/parser';
+import prisma from '../src/lib/db';
 
 interface ExtractedListing {
   address: string;
@@ -79,6 +83,139 @@ async function fetchViaScraperAPI(url: string): Promise<string> {
     throw new Error(`ScraperAPI ${resp.status}: ${(await resp.text()).substring(0, 200)}`);
   }
   return await resp.text();
+}
+
+/**
+ * Save a scraped listing as a full Property record with rent research and analysis.
+ * Skips if a property with the same listingUrl or address already exists.
+ */
+async function saveListingToDatabase(listing: ExtractedListing): Promise<{
+  skipped?: boolean;
+  property?: any;
+  error?: string;
+}> {
+  if (!listing.price || listing.price < 10000) {
+    return { error: 'missing price' };
+  }
+
+  // Dedupe by listing URL first, then by address
+  const byUrl = await prisma.property.findFirst({ where: { listingUrl: listing.listingUrl } });
+  if (byUrl) return { skipped: true, property: byUrl };
+
+  if (listing.address && listing.address !== 'Unknown') {
+    const byAddr = await prisma.property.findFirst({ where: { address: listing.address } });
+    if (byAddr) {
+      // Backfill listingUrl
+      if (!byAddr.listingUrl) {
+        await prisma.property.update({
+          where: { id: byAddr.id },
+          data: { listingUrl: listing.listingUrl },
+        });
+      }
+      return { skipped: true, property: byAddr };
+    }
+  }
+
+  // Convert to ParsedProperty shape for analysis
+  const parsed: ParsedProperty = {
+    address: listing.address || 'Unknown',
+    city: listing.city || '',
+    state: listing.state || 'MA',
+    zip: listing.zip || '',
+    type: listing.type || 'Condo',
+    mlsId: '',
+    complex: '',
+    bedrooms: listing.bedrooms || 0,
+    bathrooms: listing.bathrooms || 0,
+    sqft: listing.sqft || 0,
+    yearBuilt: listing.yearBuilt || 0,
+    listPrice: listing.price,
+    hoaFee: listing.hoaFee || 0,
+    hoaIncludes: '',
+    taxAnnual: listing.taxAnnual || 0,
+    taxYear: 2025,
+    assessed: 0,
+    parking: 0,
+    dom: 0,
+  };
+
+  // Research rent (uses Claude web_search — may be slow / cost API credits)
+  const rentData = await researchRent(parsed);
+  const rent = Number.isFinite(rentData.rent) ? rentData.rent : 0;
+
+  // Run ROI analysis
+  const result = analyze(parsed, rent, listing.price);
+
+  // Save to DB via Prisma — mirrors analyzeProperty() shape
+  const saved = await prisma.property.create({
+    data: {
+      address: parsed.address,
+      city: parsed.city || null,
+      state: parsed.state,
+      zip: parsed.zip || null,
+      type: parsed.type,
+      bedrooms: parsed.bedrooms,
+      bathrooms: parsed.bathrooms,
+      sqft: parsed.sqft,
+      yearBuilt: parsed.yearBuilt || null,
+      listPrice: parsed.listPrice,
+      hoaFee: parsed.hoaFee,
+      taxAnnual: parsed.taxAnnual,
+      taxYear: parsed.taxYear,
+      parking: 0,
+      dom: 0,
+      rawMls: `[Imported from Zillow via email sync]\n${listing.listingUrl}`.substring(0, 50000),
+      listingUrl: listing.listingUrl,
+      adjPrice: listing.price,
+      adjRent: rent,
+      rentResearch: {
+        create: {
+          rent,
+          low: Number.isFinite(rentData.low) ? rentData.low : 0,
+          high: Number.isFinite(rentData.high) ? rentData.high : 0,
+          confidence: rentData.confidence || 'Low',
+          methodology: rentData.methodology || null,
+          comps: {
+            create: (rentData.comps || []).map(c => ({
+              address: String(c.address || 'Unknown'),
+              rent: Number.isFinite(c.rent) ? c.rent : 0,
+              note: c.note ? String(c.note) : null,
+            })),
+          },
+        },
+      },
+      analysis: {
+        create: {
+          priceUsed: listing.price,
+          rentUsed: rent,
+          totalExpMo: result.totalExpMo,
+          netMo: result.netMo,
+          capRate: result.capRate,
+          expRatio: result.expRatio,
+          grm: result.grm,
+          breakMo: result.breakMo,
+          rating: result.rating,
+          expenses: {
+            create: result.expenses.map((e, i) => ({
+              name: e.name,
+              monthly: e.monthly,
+              note: e.note,
+              sortOrder: i,
+            })),
+          },
+          observations: {
+            create: result.observations.map(o => ({
+              color: o.color,
+              icon: o.icon,
+              text: o.text,
+            })),
+          },
+        },
+      },
+    },
+  });
+
+  return { property: saved };
 }
 
 function parseZillowHtml(html: string): Partial<ExtractedListing> {
@@ -252,6 +389,19 @@ async function refreshAccessToken(): Promise<string> {
   return data.access_token;
 }
 
+async function gmailTrashMessage(accessToken: string, messageId: string): Promise<void> {
+  const resp = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/trash`,
+    {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${accessToken}` },
+    },
+  );
+  if (!resp.ok) {
+    throw new Error(`Gmail trash error: ${resp.status} ${await resp.text()}`);
+  }
+}
+
 async function gmailFetch(accessToken: string, endpoint: string) {
   const resp = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/${endpoint}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -406,6 +556,8 @@ async function resolveAndDedupe(urls: string[]): Promise<string[]> {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run');
+  const noTrash = args.includes('--no-trash');
+  const skipDb = args.includes('--skip-db');
   const daysIdx = args.indexOf('--days');
   const days = daysIdx >= 0 ? parseInt(args[daysIdx + 1]) || 3 : 3;
   const queryIdx = args.indexOf('--query');
@@ -445,15 +597,15 @@ async function main() {
     return;
   }
 
-  // Fetch each email; collect URLs + extract listing data from subject/body
+  // Fetch each email; collect URLs + track which message each came from
   const extractedListings: ExtractedListing[] = [];
-  const trackingUrlToEmail = new Map<string, { subject: string; body: string }>();
+  const trackingUrlToEmail = new Map<string, { subject: string; body: string; msgId: string }>();
+  const messageIdToUrls = new Map<string, Set<string>>(); // msgId -> set of canonical URLs
 
   for (const msgId of messageIds) {
     const msg = await gmailFetch(accessToken, `messages/${msgId}?format=full`);
 
     const subject = msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === 'subject')?.value || '';
-    const from = msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
 
     let body = '';
     if (msg.payload?.body?.data) {
@@ -466,31 +618,32 @@ async function main() {
 
     console.log(`   📬 ${subject.substring(0, 70)}`);
 
-    // Find tracking URLs in this email and map them to this email for later lookup
     const urls = extractListingUrls(body);
     for (const u of urls) {
-      trackingUrlToEmail.set(u, { subject, body });
+      trackingUrlToEmail.set(u, { subject, body, msgId });
     }
+    messageIdToUrls.set(msgId, new Set());
   }
 
-  // Collect all tracking URLs
   const allUrls = Array.from(trackingUrlToEmail.keys());
 
   // Resolve aggregator tracking URLs to final listing URLs
-  const canonicalToEmail = new Map<string, { subject: string; body: string }>();
+  const canonicalToEmail = new Map<string, { subject: string; body: string; msgId: string }>();
   let unique: string[] = [];
   if (allUrls.length > 0) {
     const rawUnique = Array.from(new Set(allUrls));
     console.log(`\n🔗 Found ${rawUnique.length} tracking URLs. Resolving...`);
 
-    // Resolve each to canonical URL and keep a map of canonical → email context
     for (const tracking of rawUnique) {
       const resolved = await resolveTrackingUrl(tracking);
       const canonical = canonicalizeListingUrl(resolved);
       if (/zillow\.com\/homedetails\/|redfin\.com\/home\/|realtor\.com\/realestateandhomes-detail\//i.test(canonical)) {
         if (!canonicalToEmail.has(canonical)) {
           const emailCtx = trackingUrlToEmail.get(tracking);
-          if (emailCtx) canonicalToEmail.set(canonical, emailCtx);
+          if (emailCtx) {
+            canonicalToEmail.set(canonical, emailCtx);
+            messageIdToUrls.get(emailCtx.msgId)?.add(canonical);
+          }
         }
       }
     }
@@ -612,42 +765,128 @@ async function main() {
   }
   console.log('└─────────────────────────────────────────────────────────────────────┘');
 
-  if (dryRun) {
-    console.log('\n🏁 Dry run complete. Use without --dry-run to write to scouted-listings.json.');
-    return;
-  }
-
-  // Write to JSON file — simple, no DB, no API required
+  // Always write a JSON audit file alongside the DB import
   const outputPath = path.resolve('scouted-listings.json');
   let existing: ExtractedListing[] = [];
   try {
     existing = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
   } catch {}
+  const jsonByUrl = new Map<string, ExtractedListing>();
+  for (const l of existing) jsonByUrl.set(l.listingUrl, l);
+  for (const l of extractedListings) jsonByUrl.set(l.listingUrl, l);
+  fs.writeFileSync(outputPath, JSON.stringify(Array.from(jsonByUrl.values()), null, 2));
+  console.log(`\n💾 Wrote ${jsonByUrl.size} listings to ${outputPath}`);
 
-  // Merge: dedupe by listingUrl
-  const byUrl = new Map<string, ExtractedListing>();
-  for (const l of existing) byUrl.set(l.listingUrl, l);
-  let newCount = 0;
-  for (const l of extractedListings) {
-    if (!byUrl.has(l.listingUrl)) {
-      byUrl.set(l.listingUrl, l);
-      newCount++;
+  if (dryRun) {
+    console.log('\n🏁 Dry run — stopping before DB import & email trashing.');
+    console.log('   Remove --dry-run to run the full pipeline.');
+    return;
+  }
+
+  // Import each listing into the database (with rent research + analysis).
+  // Track which messages successfully had all their listings imported so we
+  // can trash only the fully-processed ones.
+  const messageImportStatus = new Map<string, { total: number; imported: number; failed: number }>();
+  for (const [msgId, urls] of messageIdToUrls.entries()) {
+    messageImportStatus.set(msgId, { total: urls.size, imported: 0, failed: 0 });
+  }
+
+  let importedCount = 0;
+  let skippedCount = 0;
+  const importErrors: string[] = [];
+
+  if (!skipDb) {
+    console.log(`\n📥 Importing ${extractedListings.length} listings into database (with rent research + ROI analysis)...`);
+    console.log(`   This calls Claude web_search for each listing. Budget ~30s per listing.\n`);
+
+    for (let i = 0; i < extractedListings.length; i++) {
+      const listing = extractedListings[i];
+      const ctx = canonicalToEmail.get(listing.listingUrl);
+      const msgId = ctx?.msgId;
+
+      process.stdout.write(`   [${i + 1}/${extractedListings.length}] ${(listing.address || 'Unknown').substring(0, 45).padEnd(45)} `);
+
+      try {
+        const result = await saveListingToDatabase(listing);
+        if (result.skipped) {
+          skippedCount++;
+          console.log(`⏭️  already in portfolio`);
+          if (msgId) messageImportStatus.get(msgId)!.imported++;
+        } else if (result.property) {
+          importedCount++;
+          const rating = result.property.analysis?.rating || '';
+          const cap = result.property.analysis?.capRate?.toFixed(1) || '?';
+          console.log(`✅ ${rating} · ${cap}% cap`);
+          if (msgId) messageImportStatus.get(msgId)!.imported++;
+        } else {
+          importErrors.push(`${listing.address || listing.listingUrl}: ${result.error}`);
+          console.log(`❌ ${result.error}`);
+          if (msgId) messageImportStatus.get(msgId)!.failed++;
+        }
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        importErrors.push(`${listing.address || listing.listingUrl}: ${msg}`);
+        console.log(`❌ ${msg.substring(0, 80)}`);
+        if (msgId) messageImportStatus.get(msgId)!.failed++;
+
+        // Back off on rate limits
+        if (/429|rate.?limit/i.test(msg)) {
+          console.log(`   ⏳ rate limited, waiting 60s...`);
+          await new Promise(r => setTimeout(r, 60000));
+        }
+      }
+
+      // Small pacing between listings
+      if (i < extractedListings.length - 1) {
+        await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+  } else {
+    console.log('\n⏭️  Skipping DB import (--skip-db). Listings saved to JSON only.');
+  }
+
+  // Trash emails whose listings were all successfully handled
+  if (!noTrash && !skipDb) {
+    console.log('\n🗑  Trashing processed emails...');
+    for (const [msgId, status] of messageImportStatus.entries()) {
+      if (status.total === 0) continue; // no listings in this email
+      if (status.failed === 0 && status.imported === status.total) {
+        try {
+          await gmailTrashMessage(accessToken, msgId);
+          console.log(`   ✓ Trashed message ${msgId}`);
+        } catch (e: any) {
+          console.log(`   ⚠️  Could not trash ${msgId}: ${e.message}`);
+        }
+      } else {
+        console.log(`   ⏭️  Keeping ${msgId} (${status.imported}/${status.total} imported, ${status.failed} failed)`);
+      }
+    }
+  } else if (noTrash) {
+    console.log('\n📬 --no-trash: leaving emails in inbox.');
+  }
+
+  console.log(`\n✅ Done!`);
+  console.log(`   Imported: ${importedCount}`);
+  console.log(`   Skipped (duplicates): ${skippedCount}`);
+  if (importErrors.length > 0) {
+    console.log(`   Errors: ${importErrors.length}`);
+    for (const err of importErrors.slice(0, 10)) {
+      console.log(`     ⚠️  ${err.substring(0, 140)}`);
+    }
+    if (importErrors.length > 10) {
+      console.log(`     ... and ${importErrors.length - 10} more`);
     }
   }
 
-  const merged = Array.from(byUrl.values());
-  fs.writeFileSync(outputPath, JSON.stringify(merged, null, 2));
-
-  console.log(`\n✅ Done!`);
-  console.log(`   Wrote ${merged.length} total listings to: ${outputPath}`);
-  console.log(`   New this run: ${newCount}`);
-  console.log(`   Skipped (already seen): ${extractedListings.length - newCount}`);
-  console.log(`\n💡 Next: Import these into your analyzer.`);
-  console.log(`   Run: npx tsx --env-file=.env scripts/import-listings.ts`);
   void mlsBodies;
 }
 
-main().catch(e => {
-  console.error(`\n❌ Error: ${e.message}`);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    await prisma.$disconnect();
+  })
+  .catch(async e => {
+    await prisma.$disconnect();
+    console.error(`\n❌ Error: ${e.message}`);
+    process.exit(1);
+  });

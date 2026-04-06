@@ -1,136 +1,98 @@
 ---
-description: Sync property listings from email into the ROI analyzer
+description: Sync property listings from email into the ROI analyzer, then trash the emails
 user_invocable: true
 ---
 
 # Email Listing Sync
 
-Sync property listings received via email into the property ROI analyzer. This skill fetches listing alert emails (Zillow, Redfin, Realtor.com, MLS, agent emails), extracts property data, runs full ROI analysis, and saves them to the portfolio with listing URLs.
+Fully automated pipeline that:
+1. Fetches unread listing alert emails from Gmail
+2. Extracts listing URLs (Zillow tracking links → canonical URLs)
+3. Scrapes full listing details (address, price, HOA, beds/baths/sqft, year built) via ScraperAPI
+4. Runs rent research via Claude web search
+5. Runs full ROI analysis (cap rate, NOI, rating)
+6. Saves each listing as a Property record in the database with the listing URL
+7. Trashes the email once all its listings are imported
 
 ## Prerequisites
 
-The app must be running (`npm run dev`) for the API import to work. Gmail API credentials must be configured for automated email fetching.
+The following must be set in `.env`:
 
-## Workflow
-
-### Option A: Automated Gmail Sync (if credentials are configured)
-
-1. Check if Gmail credentials exist in `.env`:
-   - `GMAIL_CLIENT_ID`
-   - `GMAIL_CLIENT_SECRET`
-   - `GMAIL_REFRESH_TOKEN`
-
-2. If credentials exist, run the sync script:
-   ```bash
-   npx tsx scripts/email-sync.ts --days 3
-   ```
-
-3. Review the output and report what was imported.
-
-### Option B: Manual Email Paste (if no Gmail credentials)
-
-1. Ask the user to paste the email body text (or forward the email content).
-
-2. Use the API to import listings. Send a POST request to the running app:
-   ```bash
-   curl -X POST http://localhost:3000/api/email-sync \
-     -H "Content-Type: application/json" \
-     -d '{"emailBody": "<pasted email content>"}'
-   ```
-
-3. Report what was imported (count, addresses, cap rates).
-
-### Option C: Direct Listing Import
-
-If the user provides listing details directly (address, price, URL), import them one at a time:
-
-```bash
-curl -X POST http://localhost:3000/api/email-sync \
-  -H "Content-Type: application/json" \
-  -d '{"listing": {"address": "123 Main St", "city": "Boston", "state": "MA", "zip": "02101", "price": 350000, "bedrooms": 2, "bathrooms": 1, "sqft": 850, "listingUrl": "https://..."}}'
+```
+GMAIL_CLIENT_ID=...
+GMAIL_CLIENT_SECRET=...
+GMAIL_REFRESH_TOKEN=...
+SCRAPER_API_KEY=...
+ANTHROPIC_API_KEY=sk-ant-...
+DATABASE_URL=postgresql://...
 ```
 
-## Running Daily (Automation)
-
-To run the sync every morning automatically on macOS, install a launchd agent:
+## Running manually
 
 ```bash
-# Create the launchd plist
-cat > ~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist << 'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.pryluk.email-listing-sync</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>-c</string>
-    <string>cd /ABSOLUTE/PATH/TO/property-analyzer && /usr/local/bin/npx tsx --env-file=.env scripts/email-sync.ts --days 2 >> /tmp/email-sync.log 2>&1</string>
-  </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key>
-    <integer>7</integer>
-    <key>Minute</key>
-    <integer>0</integer>
-  </dict>
-  <key>RunAtLoad</key>
-  <false/>
-</dict>
-</plist>
-EOF
-
-# Load it
-launchctl load ~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist
+npx tsx --env-file=.env scripts/email-sync.ts --days 14
 ```
 
-This runs the sync every day at 7:00 AM, looking back 2 days to catch anything new. Logs go to `/tmp/email-sync.log`.
+### Options
+- `--days N` — look back N days (default: 3)
+- `--dry-run` — extract and write JSON but skip DB import and email trashing
+- `--no-trash` — import to DB but leave emails in inbox
+- `--skip-db` — extract + scrape + write JSON only, no DB/Claude/trash
+- `--query "..."` — custom Gmail search query
 
-**Requirements**: The app must be running (`npm run dev` or deployed). For a deployed app, set `APP_URL` in `.env` to the deployed URL instead of localhost.
+### Recommended first run
 
-**Alternative**: Use GitHub Actions with a scheduled workflow, or Render.com cron jobs, if you want it to run server-side without your laptop being on.
+```bash
+# See what would be processed without touching anything
+npx tsx --env-file=.env scripts/email-sync.ts --days 14 --dry-run
 
-## Supported Email Sources
+# Import listings but keep emails for review
+npx tsx --env-file=.env scripts/email-sync.ts --days 14 --no-trash
 
-- **Zillow** — "New listings" and "Price reduced" alerts
-- **Redfin** — "New homes" and "Price drop" alerts  
-- **Realtor.com** — Listing alert emails
-- **MLS Direct** — Agent MLS listing emails
-- **Generic** — Any email with property URLs and price/address data
+# Full pipeline (import + trash)
+npx tsx --env-file=.env scripts/email-sync.ts --days 14
+```
 
-## What Gets Imported
+## Daily Automation (macOS launchd)
 
-For each listing found in the email:
-1. Property details (address, price, beds/baths, sqft)
-2. Listing URL (direct link back to the source)
-3. AI-powered rent estimate (via Anthropic API)
-4. Full ROI analysis (cap rate, NOI, expenses, rating)
-5. Saved to portfolio as a new "Prospect" deal
+Install the daily agent to run every morning at 7 AM:
 
-Duplicate properties (same address) are automatically skipped. If a duplicate is found but was missing a listing URL, the URL gets backfilled.
+```bash
+bash scripts/install-daily-sync.sh
+```
 
-## Gmail API Setup (One-Time)
+This creates `~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist`, loads it, and runs the sync each morning with `--days 2` to catch anything new.
 
-If the user needs to set up Gmail API access:
+**Check logs**: `tail -f /tmp/email-listing-sync.log`
 
-1. Go to https://console.cloud.google.com/
-2. Create a new project (or use existing)
-3. Enable the **Gmail API**
-4. Create **OAuth 2.0 credentials** (Desktop application type)
-5. Run the OAuth flow to get a refresh token
-6. Add to `.env`:
-   ```
-   GMAIL_CLIENT_ID=your-client-id
-   GMAIL_CLIENT_SECRET=your-client-secret
-   GMAIL_REFRESH_TOKEN=your-refresh-token
-   ```
+**Trigger manually**: `launchctl start com.pryluk.email-listing-sync`
 
-## Output
+**Uninstall**:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist
+rm ~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist
+```
 
-After syncing, report:
-- Number of listings imported
-- Number of duplicates skipped
-- For each imported property: address, price, cap rate, rating, and listing URL
-- Any errors encountered
+## How it works
+
+### Data sources per listing
+| Field | Source |
+|---|---|
+| Listing URL | Gmail email body (tracking link resolved to canonical Zillow URL) |
+| Address, city, state, zip | Zillow `og:title` meta tag (via ScraperAPI) |
+| Price, beds, baths, sqft | Zillow meta `description` tag (via ScraperAPI) |
+| Year built, HOA, type | Zillow meta description + `__NEXT_DATA__` (via ScraperAPI) |
+| Property tax | `__NEXT_DATA__` or 1.2%-of-price fallback in `analyze()` |
+| Rent | Claude web search via `researchRent()` |
+| Insurance, maintenance, CapEx | Formulas in `analyze()` based on price + type |
+| Cap rate, NOI, rating | Computed by `analyze()` |
+
+### Email handling
+- Each unique canonical listing URL is only imported once (deduped by listing URL and address in the DB)
+- An email is trashed only when **every** listing in it was successfully imported or was already in the portfolio
+- Emails with even one failed import are left in the inbox for manual review
+
+### Cost per run
+- ScraperAPI: ~25 credits per Zillow page (premium proxy + JS render). 1000 free credits/month ≈ 40 listings
+- Anthropic API: ~$0.03–0.05 per listing (Claude web search for rent research)
+- Gmail API: free (within quotas)
