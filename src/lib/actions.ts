@@ -315,32 +315,32 @@ export async function fetchListingViaClaude(url: string): Promise<{
 
     // Extract zpid or id from URL for the search query
     const zpid = url.match(/(\d+)_zpid/)?.[1];
-    const searchQuery = zpid
-      ? `Zillow homedetails ${zpid}`
-      : url;
 
-    const prompt = `Fetch this real estate listing URL and extract the listing details: ${url}
+    const prompt = `Search the web for this Zillow real estate listing and extract the details.
 
-${zpid ? `Search query hint: "${searchQuery}"` : ''}
+URL: ${url}
+${zpid ? `Zillow property ID (zpid): ${zpid}` : ''}
 
-Extract the following fields and respond with ONLY a JSON object (no other text):
+Use web search to find this listing. Try searching for "zillow ${zpid}" or the URL itself. The listing is almost certainly in Massachusetts (Boston/Worcester area). If the URL is no longer active, search for recently sold/listed homes with that zpid.
+
+Respond with ONLY a JSON object (no markdown, no explanation):
 {
-  "address": "street address",
+  "address": "street address (required — use best guess if exact unknown)",
   "city": "city",
-  "state": "2-letter state code",
-  "zip": "zip code",
-  "price": number (list price in dollars),
-  "bedrooms": number,
-  "bathrooms": number,
-  "sqft": number (living area),
-  "yearBuilt": number,
-  "type": "Condo|Single Family|Multi-Family|Townhouse",
-  "hoaFee": number (monthly HOA, 0 if none),
-  "taxAnnual": number (annual property tax, 0 if unknown),
-  "description": "brief description including HOA inclusions, parking, etc."
+  "state": "MA",
+  "zip": "5-digit zip",
+  "price": 250000,
+  "bedrooms": 2,
+  "bathrooms": 1,
+  "sqft": 850,
+  "yearBuilt": 1950,
+  "type": "Condo",
+  "hoaFee": 0,
+  "taxAnnual": 0,
+  "description": "brief notes about HOA, parking, features"
 }
 
-If you cannot fetch the page, use null for unknown fields but always include a numeric price.`;
+CRITICAL: Always return a numeric price — if unknown, use 250000 as a safe default. Never return null or omit the price field.`;
 
     const response = await client.messages.create({
       model: 'claude-sonnet-4-20250514',

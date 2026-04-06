@@ -3,22 +3,34 @@
  * Email Listing Sync Script
  *
  * Fetches property listing emails via Gmail API and imports them
- * into the property analyzer.
- *
- * Setup:
- *   1. Create a Google Cloud project and enable Gmail API
- *   2. Create OAuth2 credentials (Desktop app type)
- *   3. Set environment variables:
- *      - GMAIL_CLIENT_ID
- *      - GMAIL_CLIENT_SECRET
- *      - GMAIL_REFRESH_TOKEN
- *   4. Run: npx tsx scripts/email-sync.ts
- *
- * Options:
- *   --days N       Look back N days (default: 3)
- *   --dry-run      Parse emails but don't import
- *   --query "..."  Custom Gmail search query
+ * into the property analyzer. Self-contained — no dev server required.
  */
+
+import * as fs from 'fs';
+import * as path from 'path';
+
+// Load .env.local in addition to --env-file=.env so we pick up Next.js
+// database URLs etc. that may only be in .env.local.
+function loadEnvFile(file: string) {
+  try {
+    const content = fs.readFileSync(file, 'utf-8');
+    for (const line of content.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 0) continue;
+      const key = trimmed.substring(0, eq).trim();
+      let val = trimmed.substring(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.substring(1, val.length - 1);
+      }
+      if (!process.env[key]) process.env[key] = val;
+    }
+  } catch {}
+}
+
+loadEnvFile(path.resolve('.env.local'));
+loadEnvFile(path.resolve('.env'));
 
 import { extractListingUrls } from '../src/lib/email-listing-parser';
 import { importListingFromUrl, analyzeProperty } from '../src/lib/actions';
@@ -279,22 +291,53 @@ async function main() {
   // Import aggregator URLs — call the action directly (no HTTP, no dev server)
   if (unique.length > 0) {
     console.log(`📥 Importing ${unique.length} Zillow listings (via Claude web search)...`);
+    console.log(`   (Pacing at ~1 request per 8 seconds to stay under rate limits)\n`);
+
     for (let i = 0; i < unique.length; i++) {
       const url = unique[i];
       process.stdout.write(`   [${i + 1}/${unique.length}] ${url.substring(0, 70)}... `);
-      try {
-        const result = await importListingFromUrl(url);
-        if (result.success && result.property) {
-          totalImported++;
-          console.log(`✅ ${result.property.address || 'imported'}`);
-        } else {
-          allErrors.push(`${url}: ${result.error}`);
-          console.log(`❌ ${result.error}`);
+
+      let attempt = 0;
+      let success = false;
+
+      while (attempt < 3 && !success) {
+        attempt++;
+        try {
+          const result = await importListingFromUrl(url);
+          if (result.success && result.property) {
+            totalImported++;
+            console.log(`✅ ${result.property.address || 'imported'}`);
+            success = true;
+          } else {
+            const err = result.error || 'unknown';
+            // Retry on rate limit
+            if (/429|rate.?limit/i.test(err) && attempt < 3) {
+              console.log(`⏳ rate limited, waiting 60s...`);
+              await new Promise(r => setTimeout(r, 60000));
+              process.stdout.write(`      retry ${attempt}... `);
+              continue;
+            }
+            allErrors.push(`${url}: ${err}`);
+            console.log(`❌ ${err.substring(0, 100)}`);
+            break;
+          }
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          if (/429|rate.?limit/i.test(msg) && attempt < 3) {
+            console.log(`⏳ rate limited, waiting 60s...`);
+            await new Promise(r => setTimeout(r, 60000));
+            process.stdout.write(`      retry ${attempt}... `);
+            continue;
+          }
+          allErrors.push(`${url}: ${msg}`);
+          console.log(`❌ ${msg.substring(0, 100)}`);
+          break;
         }
-      } catch (e: any) {
-        const msg = e?.message || String(e);
-        allErrors.push(`${url}: ${msg}`);
-        console.log(`❌ ${msg}`);
+      }
+
+      // Pace requests to avoid hitting the 30k tokens/min limit
+      if (i < unique.length - 1) {
+        await new Promise(r => setTimeout(r, 8000));
       }
     }
   }
