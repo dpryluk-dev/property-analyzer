@@ -19,7 +19,7 @@ import * as readline from 'readline';
 
 const CLIENT_ID = process.env.GMAIL_CLIENT_ID;
 const CLIENT_SECRET = process.env.GMAIL_CLIENT_SECRET;
-const REDIRECT_URI = 'urn:ietf:wg:oauth:2.0:oob'; // Manual copy/paste flow
+const REDIRECT_URI = 'http://localhost:8080'; // Google deprecated the oob flow; localhost works for Desktop clients
 const SCOPES = 'https://www.googleapis.com/auth/gmail.readonly';
 
 function ask(question: string): Promise<string> {
