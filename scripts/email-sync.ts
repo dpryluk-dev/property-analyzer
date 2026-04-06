@@ -33,7 +33,6 @@ loadEnvFile(path.resolve('.env.local'));
 loadEnvFile(path.resolve('.env'));
 
 import { extractListingUrls } from '../src/lib/email-listing-parser';
-import { researchRent } from '../src/lib/rent-research';
 import { analyze } from '../src/lib/analysis';
 import type { ParsedProperty } from '../src/lib/parser';
 import prisma from '../src/lib/db';
@@ -139,9 +138,23 @@ async function saveListingToDatabase(listing: ExtractedListing): Promise<{
     dom: 0,
   };
 
-  // Research rent (uses Claude web_search — may be slow / cost API credits)
-  const rentData = await researchRent(parsed);
-  const rent = Number.isFinite(rentData.rent) ? rentData.rent : 0;
+  // Rent estimate — formula-based (no Claude). Same fallback formula used in
+  // rent-research.ts when the API fails. User can override in the UI for any
+  // property they want to dial in.
+  const formulaRent = Math.max(
+    Math.round((listing.price || 200000) / 19 / 12 / 50) * 50,
+    (listing.bedrooms || 1) * 800,
+  );
+
+  const rentData = {
+    rent: formulaRent,
+    low: Math.round(formulaRent * 0.85),
+    high: Math.round(formulaRent * 1.15),
+    confidence: 'Low',
+    methodology: 'Formula estimate (price/19/12). Verify on Zillow/Apartments.com and update via the Portfolio tab.',
+    comps: [] as { address: string; rent: number; note: string }[],
+  };
+  const rent = rentData.rent;
 
   // Run ROI analysis
   const result = analyze(parsed, rent, listing.price);
