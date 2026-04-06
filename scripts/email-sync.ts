@@ -84,67 +84,131 @@ async function fetchViaScraperAPI(url: string): Promise<string> {
 function parseZillowHtml(html: string): Partial<ExtractedListing> {
   const result: Partial<ExtractedListing> = {};
 
-  // Zillow __NEXT_DATA__ blob has everything structured
+  // Helper to decode HTML entities
+  const decode = (s: string) => s
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&nbsp;/g, ' ');
+
+  // 1. og:title — format: "531 Main St #403M, Worcester, MA 01608 | MLS #73459981 | Zillow"
+  const ogTitle = html.match(/<meta[^>]*property=["']og:title["'][^>]*content=["']([^"']+)["']/i)?.[1]
+    || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*property=["']og:title["']/i)?.[1];
+
+  if (ogTitle) {
+    const decoded = decode(ogTitle);
+    // "ADDRESS, CITY, STATE ZIP | ..."
+    const addrMatch = decoded.match(/^([^,]+),\s*([^,]+),\s*([A-Z]{2})\s*(\d{5})/);
+    if (addrMatch) {
+      result.address = addrMatch[1].trim();
+      result.city = addrMatch[2].trim();
+      result.state = addrMatch[3];
+      result.zip = addrMatch[4];
+    }
+  }
+
+  // 2. meta description — format: "Zillow has X photos of this $PRICE N beds, M baths, SQFT Square Feet TYPE home located at ADDRESS built in YEAR..."
+  const metaDesc = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i)?.[1]
+    || html.match(/<meta[^>]*content=["']([^"']+)["'][^>]*name=["']description["']/i)?.[1];
+
+  if (metaDesc) {
+    const decoded = decode(metaDesc);
+
+    const priceMatch = decoded.match(/\$\s*([\d,]+)/);
+    if (priceMatch) result.price = parseInt(priceMatch[1].replace(/,/g, ''));
+
+    const bedsMatch = decoded.match(/(\d+)\s*beds?/i);
+    if (bedsMatch) result.bedrooms = parseInt(bedsMatch[1]);
+
+    const bathsMatch = decoded.match(/([\d.]+)\s*baths?/i);
+    if (bathsMatch) result.bathrooms = parseFloat(bathsMatch[1]);
+
+    const sqftMatch = decoded.match(/([\d,]+)\s*Square\s*Feet/i);
+    if (sqftMatch) result.sqft = parseInt(sqftMatch[1].replace(/,/g, ''));
+
+    const yearMatch = decoded.match(/built\s*in\s*(\d{4})/i);
+    if (yearMatch) result.yearBuilt = parseInt(yearMatch[1]);
+
+    if (/condo/i.test(decoded)) result.type = 'Condo';
+    else if (/single.?family/i.test(decoded)) result.type = 'Single Family';
+    else if (/townho/i.test(decoded)) result.type = 'Townhouse';
+    else if (/multi.?family/i.test(decoded)) result.type = 'Multi-Family';
+
+    // If og:title didn't give us the address, try extracting from description
+    if (!result.address) {
+      const locMatch = decoded.match(/located\s*at\s*([^,]+),\s*([^,]+),\s*([A-Z]{2})\s*(\d{5})/i);
+      if (locMatch) {
+        result.address = locMatch[1].trim();
+        result.city = locMatch[2].trim();
+        result.state = locMatch[3];
+        result.zip = locMatch[4];
+      }
+    }
+  }
+
+  // 3. __NEXT_DATA__ — dig for HOA, tax, and anything else still missing
   const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
   if (nextDataMatch) {
     try {
       const nextData = JSON.parse(nextDataMatch[1]);
       const findProperty = (obj: any, depth = 0): any => {
-        if (!obj || depth > 12 || typeof obj !== 'object') return null;
-        if (obj.price && (obj.bedrooms !== undefined || obj.livingArea !== undefined || obj.address)) {
-          return obj;
-        }
-        for (const key in obj) {
-          const found = findProperty(obj[key], depth + 1);
-          if (found) return found;
+        if (!obj || depth > 15 || typeof obj !== 'object') return null;
+        if (obj.hdpUrl || obj.zpid || (obj.price && obj.bedrooms !== undefined)) return obj;
+        if (Array.isArray(obj)) {
+          for (const item of obj) {
+            const found = findProperty(item, depth + 1);
+            if (found) return found;
+          }
+        } else {
+          for (const key in obj) {
+            const found = findProperty(obj[key], depth + 1);
+            if (found) return found;
+          }
         }
         return null;
       };
 
       const prop = findProperty(nextData);
       if (prop) {
-        result.price = typeof prop.price === 'number' ? prop.price : parseFloat(prop.price) || undefined;
-        result.bedrooms = prop.bedrooms || undefined;
-        result.bathrooms = prop.bathrooms || undefined;
-        result.sqft = prop.livingArea || prop.livingAreaValue || undefined;
-        result.yearBuilt = prop.yearBuilt || undefined;
-        result.hoaFee = prop.monthlyHoaFee || prop.hoaFee || 0;
-        if (prop.propertyTaxRate && prop.price) {
-          result.taxAnnual = Math.round(prop.price * prop.propertyTaxRate / 100);
+        if (!result.price && prop.price) result.price = typeof prop.price === 'number' ? prop.price : parseFloat(prop.price);
+        if (!result.bedrooms && prop.bedrooms) result.bedrooms = prop.bedrooms;
+        if (!result.bathrooms && prop.bathrooms) result.bathrooms = prop.bathrooms;
+        if (!result.sqft && (prop.livingArea || prop.livingAreaValue)) {
+          result.sqft = prop.livingArea || prop.livingAreaValue;
         }
-        if (prop.address) {
-          result.address = prop.address.streetAddress || undefined;
-          result.city = prop.address.city || undefined;
-          result.state = prop.address.state || undefined;
-          result.zip = prop.address.zipcode || undefined;
+        if (!result.yearBuilt && prop.yearBuilt) result.yearBuilt = prop.yearBuilt;
+        if (prop.monthlyHoaFee || prop.hoaFee) result.hoaFee = prop.monthlyHoaFee || prop.hoaFee;
+        if (prop.propertyTaxRate && (result.price || prop.price)) {
+          result.taxAnnual = Math.round((result.price || prop.price) * prop.propertyTaxRate / 100);
         }
-        if (prop.homeType) {
-          result.type = /condo/i.test(prop.homeType) ? 'Condo'
-            : /single/i.test(prop.homeType) ? 'Single Family'
-            : /town/i.test(prop.homeType) ? 'Townhouse'
-            : /multi/i.test(prop.homeType) ? 'Multi-Family'
-            : 'Condo';
+        if (!result.address && prop.address) {
+          result.address = prop.address.streetAddress || result.address;
+          result.city = prop.address.city || result.city;
+          result.state = prop.address.state || result.state;
+          result.zip = prop.address.zipcode || result.zip;
         }
       }
     } catch {}
   }
 
-  // Regex fallbacks
-  if (!result.price) {
-    const m = html.match(/"price"\s*:\s*(\d+)/);
-    if (m) result.price = parseInt(m[1]);
-  }
+  // 4. Regex fallbacks for HOA / tax
   if (!result.hoaFee) {
     const m = html.match(/"monthlyHoaFee"\s*:\s*(\d+)/) || html.match(/HOA[^$]{0,50}\$(\d+)\s*\/?\s*mo/i);
     if (m) result.hoaFee = parseInt(m[1]);
   }
   if (!result.taxAnnual) {
-    const m = html.match(/"taxAnnualAmount"\s*:\s*(\d+)/) || html.match(/annual\s*tax[^$]{0,50}\$([\d,]+)/i);
-    if (m) result.taxAnnual = parseInt(String(m[1]).replace(/,/g, ''));
-  }
-  if (!result.yearBuilt) {
-    const m = html.match(/"yearBuilt"\s*:\s*(\d{4})/) || html.match(/built\s*in\s*(\d{4})/i);
-    if (m) result.yearBuilt = parseInt(m[1]);
+    const m = html.match(/"taxAnnualAmount"\s*:\s*(\d+)/) || html.match(/"annualHomeownersInsurance"\s*:\s*\d+[^}]*?"propertyTaxRate"\s*:\s*([\d.]+)/);
+    if (m) {
+      const val = parseFloat(m[1]);
+      if (val < 10) {
+        // It's a rate, convert to annual amount
+        if (result.price) result.taxAnnual = Math.round(result.price * val / 100);
+      } else {
+        result.taxAnnual = val;
+      }
+    }
   }
 
   return result;
