@@ -33,6 +33,7 @@ loadEnvFile(path.resolve('.env.local'));
 loadEnvFile(path.resolve('.env'));
 
 import { extractListingUrls } from '../src/lib/email-listing-parser';
+import { researchRent } from '../src/lib/rent-research';
 import { analyze } from '../src/lib/analysis';
 import type { ParsedProperty } from '../src/lib/parser';
 import prisma from '../src/lib/db';
@@ -138,29 +139,21 @@ async function saveListingToDatabase(listing: ExtractedListing): Promise<{
     dom: 0,
   };
 
-  // Rent estimate — formula-based (no Claude). Same fallback formula used in
-  // rent-research.ts when the API fails. User can override in the UI for any
-  // property they want to dial in.
-  const formulaRent = Math.max(
-    Math.round((listing.price || 200000) / 19 / 12 / 50) * 50,
-    (listing.bedrooms || 1) * 800,
-  );
-
-  const rentData = {
-    rent: formulaRent,
-    low: Math.round(formulaRent * 0.85),
-    high: Math.round(formulaRent * 1.15),
-    confidence: 'Low',
-    methodology: 'Formula estimate (price/19/12). Verify on Zillow/Apartments.com and update via the Portfolio tab.',
-    comps: [] as { address: string; rent: number; note: string }[],
-  };
-  const rent = rentData.rent;
+  // Research rent via Claude web search — the one field we can't get from
+  // ScraperAPI since rent data isn't shown on for-sale listing pages.
+  // Falls back to a formula estimate internally if the API errors.
+  const rentData = await researchRent(parsed);
+  const rent = Number.isFinite(rentData.rent) && rentData.rent > 0 ? rentData.rent : 0;
 
   // Run ROI analysis
   const result = analyze(parsed, rent, listing.price);
 
   // Save to DB via Prisma — mirrors analyzeProperty() shape
   const saved = await prisma.property.create({
+    include: {
+      analysis: true,
+      rentResearch: true,
+    },
     data: {
       address: parsed.address,
       city: parsed.city || null,
@@ -810,7 +803,7 @@ async function main() {
 
   if (!skipDb) {
     console.log(`\n📥 Importing ${extractedListings.length} listings into database (with rent research + ROI analysis)...`);
-    console.log(`   This calls Claude web_search for each listing. Budget ~30s per listing.\n`);
+    console.log(`   Each listing calls Claude web_search for rent comps (~10-20s per listing).\n`);
 
     for (let i = 0; i < extractedListings.length; i++) {
       const listing = extractedListings[i];
@@ -827,9 +820,11 @@ async function main() {
           if (msgId) messageImportStatus.get(msgId)!.imported++;
         } else if (result.property) {
           importedCount++;
-          const rating = result.property.analysis?.rating || '';
-          const cap = result.property.analysis?.capRate?.toFixed(1) || '?';
-          console.log(`✅ ${rating} · ${cap}% cap`);
+          const p: any = result.property;
+          const rating = p.analysis?.rating || '';
+          const cap = typeof p.analysis?.capRate === 'number' ? p.analysis.capRate.toFixed(1) : '?';
+          const rentVal = p.rentResearch?.rent || p.adjRent || 0;
+          console.log(`✅ rent $${rentVal.toLocaleString()} · ${rating} · ${cap}% cap`);
           if (msgId) messageImportStatus.get(msgId)!.imported++;
         } else {
           importErrors.push(`${listing.address || listing.listingUrl}: ${result.error}`);
