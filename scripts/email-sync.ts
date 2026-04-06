@@ -20,7 +20,7 @@
  *   --query "..."  Custom Gmail search query
  */
 
-import { parseListingEmail, type EmailListing } from '../src/lib/email-listing-parser';
+import { extractListingUrls } from '../src/lib/email-listing-parser';
 
 const BASE_URL = process.env.APP_URL || 'http://localhost:3000';
 
@@ -141,8 +141,8 @@ async function main() {
     return;
   }
 
-  // Fetch and parse each email
-  const allListings: EmailListing[] = [];
+  // Fetch each email and collect listing URLs
+  const allUrls: string[] = [];
 
   for (const msgId of messageIds) {
     const msg = await gmailFetch(accessToken, `messages/${msgId}?format=full`);
@@ -159,49 +159,41 @@ async function main() {
 
     if (!body) continue;
 
-    const listings = parseListingEmail(body);
-    if (listings.length > 0) {
+    const urls = extractListingUrls(body);
+    if (urls.length > 0) {
       console.log(`   📬 ${subject.substring(0, 60)} (from: ${from.substring(0, 40)})`);
-      console.log(`      → ${listings.length} listing(s) found`);
-      allListings.push(...listings);
+      console.log(`      → ${urls.length} listing URL(s) found`);
+      allUrls.push(...urls);
     }
   }
 
-  // Deduplicate across all emails
-  const seen = new Set<string>();
-  const unique = allListings.filter(l => {
-    const key = l.address.toLowerCase().replace(/\s+/g, ' ');
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // Deduplicate URLs
+  const unique = Array.from(new Set(allUrls));
 
-  console.log(`\n📊 Summary: ${unique.length} unique listings from ${messageIds.length} emails\n`);
+  console.log(`\n📊 Summary: ${unique.length} unique listing URLs from ${messageIds.length} emails\n`);
 
   if (unique.length === 0) {
-    console.log('No listings extracted. Emails may use unsupported formats.');
+    console.log('No listing URLs found. Emails may use unsupported formats.');
     return;
   }
 
-  // Print listings
-  for (const l of unique) {
-    console.log(`   ${l.address}, ${l.city}, ${l.state} ${l.zip}`);
-    console.log(`     $${l.price.toLocaleString()} | ${l.bedrooms}bd/${l.bathrooms}ba | ${l.sqft} sqft`);
-    if (l.listingUrl) console.log(`     🔗 ${l.listingUrl}`);
-    console.log('');
+  // Print URLs
+  for (const url of unique) {
+    console.log(`   🔗 ${url.substring(0, 120)}${url.length > 120 ? '...' : ''}`);
   }
+  console.log('');
 
   if (dryRun) {
-    console.log('🏁 Dry run complete. Use without --dry-run to import.');
+    console.log('🏁 Dry run complete. Use without --dry-run to fetch pages and import.');
     return;
   }
 
-  // Import via API
-  console.log('📥 Importing listings...');
+  // Import via API — the server fetches each URL, extracts page text, and analyzes
+  console.log('📥 Fetching each listing page and importing...');
   const resp = await fetch(`${BASE_URL}/api/email-sync`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ listings: unique }),
+    body: JSON.stringify({ urls: unique }),
   });
 
   if (!resp.ok) {

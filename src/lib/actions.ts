@@ -296,6 +296,101 @@ export async function dismissScoutedDeal(id: string) {
   return getScoutedDeals();
 }
 
+// --- Listing Page Fetch & Import ---
+
+/**
+ * Fetch a listing page URL with browser-like headers, follow redirects
+ * (Zillow/Redfin tracking links), and return the final URL + extracted text.
+ */
+export async function fetchListingPage(url: string): Promise<{
+  finalUrl: string;
+  text: string;
+  error?: string;
+}> {
+  try {
+    const resp = await fetch(url, {
+      redirect: 'follow',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept':
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    });
+
+    if (!resp.ok) {
+      return {
+        finalUrl: resp.url || url,
+        text: '',
+        error: `HTTP ${resp.status}: ${resp.statusText}`,
+      };
+    }
+
+    const html = await resp.text();
+
+    // Extract JSON-LD blocks first (most structured data)
+    const jsonLdBlocks = Array.from(
+      html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi),
+    ).map(m => m[1]);
+
+    // Strip scripts/styles/tags to get readable text
+    let text = html
+      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+      .replace(/<!--[\s\S]*?-->/g, ' ')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Prepend any JSON-LD so the parser can pick up structured fields
+    if (jsonLdBlocks.length > 0) {
+      text = jsonLdBlocks.join('\n') + '\n\n' + text;
+    }
+
+    return { finalUrl: resp.url || url, text: text.substring(0, 50000) };
+  } catch (e: any) {
+    return { finalUrl: url, text: '', error: e?.message || String(e) };
+  }
+}
+
+/**
+ * Fetch a listing URL, extract page content, run ROI analysis, and save.
+ */
+export async function importListingFromUrl(url: string): Promise<{
+  success: boolean;
+  error?: string;
+  property?: any;
+}> {
+  const fetched = await fetchListingPage(url);
+
+  if (fetched.error || !fetched.text) {
+    return { success: false, error: fetched.error || 'Empty page content' };
+  }
+
+  try {
+    // Use the existing analyzer on the fetched page text
+    const property = await analyzeProperty(fetched.text);
+
+    // Attach the listing URL (use the final URL after redirects)
+    await prisma.property.update({
+      where: { id: property.id },
+      data: { listingUrl: fetched.finalUrl },
+    });
+    property.listingUrl = fetched.finalUrl;
+
+    return { success: true, property };
+  } catch (e: any) {
+    return { success: false, error: e?.message || String(e) };
+  }
+}
+
 // --- Email Listing Import ---
 
 export async function importListingsFromEmail(emailBody: string): Promise<{

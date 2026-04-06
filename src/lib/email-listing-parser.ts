@@ -24,55 +24,53 @@ function num(s: string | undefined | null): number {
 }
 
 /**
- * Extract listings from Zillow alert email body (plain text or HTML stripped).
+ * Extract all listing URLs from an email body (any source).
+ * Returns unique URLs pointing to listing detail pages.
  */
-function parseZillowEmail(text: string): EmailListing[] {
-  const listings: EmailListing[] = [];
+export function extractListingUrls(emailBody: string): string[] {
+  const patterns = [
+    // Zillow tracking links + direct homedetails links
+    /https?:\/\/\S*?(?:click\.mail\.)?zillow\.com\/\S+/gi,
+    // Redfin
+    /https?:\/\/\S*?redfin\.com\/\S+/gi,
+    // Realtor.com
+    /https?:\/\/\S*?realtor\.com\/\S+/gi,
+    // Trulia
+    /https?:\/\/\S*?trulia\.com\/\S+/gi,
+    // Compass
+    /https?:\/\/\S*?compass\.com\/\S+/gi,
+    // Homes.com
+    /https?:\/\/\S*?homes\.com\/\S+/gi,
+  ];
 
-  // Zillow emails typically have patterns like:
-  // $349,000 | 2 bd | 1 ba | 850 sqft
-  // 123 Main St, Boston, MA 02101
-  // https://www.zillow.com/homedetails/...
-  const blocks = text.split(/(?=\$[\d,]+\s*(?:\||·|—|-))/);
+  const urls = new Set<string>();
 
-  for (const block of blocks) {
-    const priceMatch = block.match(/\$([\d,]+)/);
-    if (!priceMatch) continue;
-    const price = num(priceMatch[1]);
-    if (price < 10000) continue; // skip non-property prices
+  for (const pattern of patterns) {
+    const matches = emailBody.matchAll(pattern);
+    for (const m of matches) {
+      // Clean trailing punctuation/whitespace/brackets
+      const url = m[0].replace(/[>\s)"'.,;]+$/, '');
 
-    const beds = num(block.match(/(\d+)\s*(?:bd|bed|br)/i)?.[1]);
-    const baths = num(block.match(/([\d.]+)\s*(?:ba|bath)/i)?.[1]);
-    const sqft = num(block.match(/([\d,]+)\s*(?:sqft|sq\s*ft)/i)?.[1]);
+      // Filter out unsubscribe/settings/footer links
+      if (/unsubscribe|preferences|settings|account|profile|help|support|privacy|terms|tos|about|contact|careers|agent-finder|mortgage/i.test(url)) continue;
 
-    // Address extraction
-    const addrMatch = block.match(/(\d+\s+[\w\s]+?(?:St|Ave|Rd|Dr|Ln|Blvd|Way|Ct|Pl|Cir|Ter)[\w.]*)\s*(?:#\s*\w+|,\s*(?:Unit|Apt|#)\s*\w+)?\s*,\s*([A-Za-z\s]+)\s*,\s*([A-Z]{2})\s*(\d{5})?/i);
-    if (!addrMatch) continue;
-
-    const urlMatch = block.match(/https?:\/\/(?:www\.)?zillow\.com\/\S+/i);
-
-    listings.push({
-      address: addrMatch[1].trim(),
-      city: addrMatch[2].trim(),
-      state: addrMatch[3].toUpperCase(),
-      zip: addrMatch[4] || '',
-      price,
-      bedrooms: beds,
-      bathrooms: baths,
-      sqft,
-      type: 'Condo',
-      listingUrl: urlMatch?.[0]?.replace(/[>\s)]+$/, '') || '',
-      source: 'Zillow',
-    });
+      urls.add(url);
+    }
   }
 
-  return listings;
+  return Array.from(urls);
+}
+
+function parseZillowEmail(_text: string): EmailListing[] {
+  // Email-body parsing disabled — we now fetch each listing URL and use the
+  // full page content for analysis. See extractListingUrls + scripts/email-sync.ts.
+  return [];
 }
 
 /**
  * Extract listings from Redfin alert email body.
  */
-function parseRedfinEmail(text: string): EmailListing[] {
+function parseRedfinEmail_unused(text: string): EmailListing[] {
   const listings: EmailListing[] = [];
 
   // Redfin emails: "$349,000 2 Bed 1 Bath 850 Sq. Ft."
@@ -115,7 +113,7 @@ function parseRedfinEmail(text: string): EmailListing[] {
 /**
  * Extract listings from Realtor.com alert email body.
  */
-function parseRealtorEmail(text: string): EmailListing[] {
+function parseRealtorEmail_unused(text: string): EmailListing[] {
   const listings: EmailListing[] = [];
 
   const blocks = text.split(/(?=\$[\d,]+)/);
@@ -157,7 +155,7 @@ function parseRealtorEmail(text: string): EmailListing[] {
  * Generic fallback parser for any listing email.
  * Looks for price + address + URL patterns.
  */
-function parseGenericListingEmail(text: string): EmailListing[] {
+function parseGenericListingEmail_unused(text: string): EmailListing[] {
   const listings: EmailListing[] = [];
 
   // Find all listing URLs
@@ -224,24 +222,14 @@ export function detectSource(text: string): string {
 export function parseListingEmail(emailBody: string): EmailListing[] {
   const source = detectSource(emailBody);
 
-  let listings: EmailListing[] = [];
-
-  switch (source) {
-    case 'zillow':
-      listings = parseZillowEmail(emailBody);
-      break;
-    case 'redfin':
-      listings = parseRedfinEmail(emailBody);
-      break;
-    case 'realtor':
-      listings = parseRealtorEmail(emailBody);
-      break;
-  }
-
-  // Fall back to generic parser if source-specific found nothing
-  if (listings.length === 0) {
-    listings = parseGenericListingEmail(emailBody);
-  }
+  // Email-body parsing is disabled — use extractListingUrls + fetch pipeline
+  // instead. This remains as a no-op stub for API compatibility.
+  void source;
+  void parseZillowEmail;
+  void parseRedfinEmail_unused;
+  void parseRealtorEmail_unused;
+  void parseGenericListingEmail_unused;
+  const listings: EmailListing[] = [];
 
   // Deduplicate by address
   const seen = new Set<string>();

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { importListingsFromEmail, importSingleListing } from '@/lib/actions';
+import { importListingsFromEmail, importSingleListing, importListingFromUrl } from '@/lib/actions';
+import { extractListingUrls } from '@/lib/email-listing-parser';
 
 /**
  * POST /api/email-sync
@@ -15,8 +16,67 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // Mode 1: Raw email body — parse and import
+    // Mode 0: A single listing URL — fetch the page and import
+    if (body.url && typeof body.url === 'string') {
+      const result = await importListingFromUrl(body.url);
+      return NextResponse.json(result);
+    }
+
+    // Mode 0b: Multiple URLs — fetch each and import
+    if (body.urls && Array.isArray(body.urls)) {
+      const results: any[] = [];
+      const errors: string[] = [];
+      let imported = 0;
+
+      for (const url of body.urls) {
+        const r = await importListingFromUrl(url);
+        if (r.success && r.property) {
+          imported++;
+          results.push(r.property);
+        } else {
+          errors.push(`${url}: ${r.error}`);
+        }
+      }
+
+      return NextResponse.json({
+        success: errors.length === 0,
+        imported,
+        skipped: 0,
+        errors,
+        properties: results,
+      });
+    }
+
+    // Mode 1: Raw email body — extract URLs, fetch each, import
     if (body.emailBody) {
+      // Prefer URL-based extraction since emails only contain snippets
+      const urls = extractListingUrls(body.emailBody);
+
+      if (urls.length > 0) {
+        const results: any[] = [];
+        const errors: string[] = [];
+        let imported = 0;
+
+        for (const url of urls) {
+          const r = await importListingFromUrl(url);
+          if (r.success && r.property) {
+            imported++;
+            results.push(r.property);
+          } else {
+            errors.push(`${url}: ${r.error}`);
+          }
+        }
+
+        return NextResponse.json({
+          success: errors.length === 0,
+          imported,
+          skipped: 0,
+          errors,
+          properties: results,
+        });
+      }
+
+      // Fall back to legacy in-email parsing (returns empty now, but kept for API shape)
       const result = await importListingsFromEmail(body.emailBody);
       return NextResponse.json(result);
     }
