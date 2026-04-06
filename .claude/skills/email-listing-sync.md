@@ -50,6 +50,48 @@ curl -X POST http://localhost:3000/api/email-sync \
   -d '{"listing": {"address": "123 Main St", "city": "Boston", "state": "MA", "zip": "02101", "price": 350000, "bedrooms": 2, "bathrooms": 1, "sqft": 850, "listingUrl": "https://..."}}'
 ```
 
+## Running Daily (Automation)
+
+To run the sync every morning automatically on macOS, install a launchd agent:
+
+```bash
+# Create the launchd plist
+cat > ~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.pryluk.email-listing-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>cd /ABSOLUTE/PATH/TO/property-analyzer && /usr/local/bin/npx tsx --env-file=.env scripts/email-sync.ts --days 2 >> /tmp/email-sync.log 2>&1</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>
+    <integer>7</integer>
+    <key>Minute</key>
+    <integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
+EOF
+
+# Load it
+launchctl load ~/Library/LaunchAgents/com.pryluk.email-listing-sync.plist
+```
+
+This runs the sync every day at 7:00 AM, looking back 2 days to catch anything new. Logs go to `/tmp/email-sync.log`.
+
+**Requirements**: The app must be running (`npm run dev` or deployed). For a deployed app, set `APP_URL` in `.env` to the deployed URL instead of localhost.
+
+**Alternative**: Use GitHub Actions with a scheduled workflow, or Render.com cron jobs, if you want it to run server-side without your laptop being on.
+
 ## Supported Email Sources
 
 - **Zillow** — "New listings" and "Price reduced" alerts

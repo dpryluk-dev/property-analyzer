@@ -97,6 +97,57 @@ function extractTextFromParts(parts: any[]): string {
   return text;
 }
 
+function canonicalizeListingUrl(url: string): string {
+  // Zillow: dedupe by zpid
+  const zpid = url.match(/(\d+)_zpid/)?.[1];
+  if (zpid && /zillow\.com/i.test(url)) {
+    return `https://www.zillow.com/homedetails/${zpid}_zpid/`;
+  }
+  // Redfin: dedupe by /home/NUMBER
+  const redfinId = url.match(/redfin\.com\/.*?\/home\/(\d+)/i)?.[1];
+  if (redfinId) {
+    return `https://www.redfin.com/home/${redfinId}`;
+  }
+  // Default: strip query string and fragment
+  return url.split('?')[0].split('#')[0];
+}
+
+async function resolveTrackingUrl(url: string): Promise<string> {
+  try {
+    const resp = await fetch(url, {
+      redirect: 'follow',
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    return resp.url || url;
+  } catch {
+    return url;
+  }
+}
+
+async function resolveAndDedupe(urls: string[]): Promise<string[]> {
+  process.stdout.write(`   Resolving ${urls.length} tracking URLs`);
+
+  const resolved = await Promise.all(
+    urls.map(async (u, i) => {
+      const r = await resolveTrackingUrl(u);
+      if (i % 10 === 0) process.stdout.write('.');
+      return canonicalizeListingUrl(r);
+    }),
+  );
+
+  process.stdout.write(' done\n');
+
+  // Only keep URLs that look like actual listing detail pages
+  const listingUrls = resolved.filter(u =>
+    /zillow\.com\/homedetails\/|redfin\.com\/home\/|realtor\.com\/realestateandhomes-detail\//i.test(u),
+  );
+
+  return Array.from(new Set(listingUrls));
+}
+
 // --- Main ---
 
 async function main() {
@@ -119,8 +170,8 @@ async function main() {
 
   const query = customQuery || [
     `after:${afterStr}`,
-    '(subject:listing OR subject:property OR subject:home OR subject:"new on market" OR subject:"price reduced" OR subject:"just listed" OR subject:alert)',
-    '(from:zillow OR from:redfin OR from:realtor.com OR from:trulia OR from:homes.com OR from:compass OR from:mls OR from:coldwell OR from:keller OR from:remax)',
+    '(subject:listing OR subject:property OR subject:home OR subject:"new on market" OR subject:"price reduced" OR subject:"just listed" OR subject:alert OR "MLS #" OR "List Price")',
+    '(from:zillow OR from:redfin OR from:realtor.com OR from:trulia OR from:homes.com OR from:compass OR from:mls OR from:coldwell OR from:keller OR from:remax OR from:mlspin OR from:flexmls OR from:matrix OR from:paragon OR from:rappattoni OR from:ntreis OR from:stellar)',
   ].join(' ');
 
   console.log(`   Query: ${query}\n`);
@@ -141,8 +192,9 @@ async function main() {
     return;
   }
 
-  // Fetch each email and collect listing URLs
+  // Fetch each email; collect URLs from aggregator emails and raw MLS text from MLS emails
   const allUrls: string[] = [];
+  const mlsBodies: { subject: string; body: string }[] = [];
 
   for (const msgId of messageIds) {
     const msg = await gmailFetch(accessToken, `messages/${msgId}?format=full`);
@@ -159,27 +211,57 @@ async function main() {
 
     if (!body) continue;
 
+    // Detect MLS-format content in the email body
+    // MLS emails typically include "MLS #", "List Price", "Total Rooms", "Living Area" etc.
+    const mlsSignals = [
+      /MLS\s*#/i,
+      /List\s*Price/i,
+      /Living\s*Area/i,
+      /Total\s*Rooms/i,
+      /Year\s*Built/i,
+      /Bedrooms?\s*:/i,
+    ];
+    const mlsSignalCount = mlsSignals.filter(p => p.test(body)).length;
+
+    if (mlsSignalCount >= 3) {
+      console.log(`   📬 ${subject.substring(0, 60)} (from: ${from.substring(0, 40)})`);
+      console.log(`      → MLS-format listing detected`);
+      mlsBodies.push({ subject, body });
+      continue;
+    }
+
+    // Otherwise treat as aggregator email (Zillow, Redfin, etc.) and extract URLs
     const urls = extractListingUrls(body);
     if (urls.length > 0) {
       console.log(`   📬 ${subject.substring(0, 60)} (from: ${from.substring(0, 40)})`);
-      console.log(`      → ${urls.length} listing URL(s) found`);
+      console.log(`      → ${urls.length} tracking URL(s) found`);
       allUrls.push(...urls);
     }
   }
 
-  // Deduplicate URLs
-  const unique = Array.from(new Set(allUrls));
+  // Resolve aggregator tracking URLs to final listing URLs
+  let unique: string[] = [];
+  if (allUrls.length > 0) {
+    const rawUnique = Array.from(new Set(allUrls));
+    console.log(`\n🔗 Found ${rawUnique.length} tracking URLs. Resolving...`);
+    unique = await resolveAndDedupe(rawUnique);
+  }
 
-  console.log(`\n📊 Summary: ${unique.length} unique listing URLs from ${messageIds.length} emails\n`);
+  console.log(`\n📊 Summary:`);
+  console.log(`   ${unique.length} unique listings (from aggregator emails)`);
+  console.log(`   ${mlsBodies.length} MLS-format emails\n`);
 
-  if (unique.length === 0) {
-    console.log('No listing URLs found. Emails may use unsupported formats.');
+  if (unique.length === 0 && mlsBodies.length === 0) {
+    console.log('No listings found. Try adjusting --days or --query.');
     return;
   }
 
   // Print URLs
   for (const url of unique) {
-    console.log(`   🔗 ${url.substring(0, 120)}${url.length > 120 ? '...' : ''}`);
+    console.log(`   🔗 ${url}`);
+  }
+  for (const m of mlsBodies) {
+    console.log(`   📄 MLS: ${m.subject.substring(0, 80)}`);
   }
   console.log('');
 
@@ -188,26 +270,51 @@ async function main() {
     return;
   }
 
-  // Import via API — the server fetches each URL, extracts page text, and analyzes
-  console.log('📥 Fetching each listing page and importing...');
-  const resp = await fetch(`${BASE_URL}/api/email-sync`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ urls: unique }),
-  });
+  let totalImported = 0;
+  const allErrors: string[] = [];
 
-  if (!resp.ok) {
-    console.error(`❌ Import failed: ${resp.status} ${await resp.text()}`);
-    return;
+  // Import aggregator URLs — server fetches each page and analyzes
+  if (unique.length > 0) {
+    console.log('📥 Fetching aggregator listing pages and importing...');
+    const resp = await fetch(`${BASE_URL}/api/email-sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ urls: unique }),
+    });
+
+    if (resp.ok) {
+      const result = await resp.json();
+      totalImported += result.imported || 0;
+      if (result.errors?.length) allErrors.push(...result.errors);
+    } else {
+      console.error(`   ❌ Import failed: ${resp.status} ${await resp.text()}`);
+    }
   }
 
-  const result = await resp.json();
+  // Import MLS-format emails — each body goes through the existing MLS analyzer
+  if (mlsBodies.length > 0) {
+    console.log('📥 Importing MLS-format listings...');
+    for (const m of mlsBodies) {
+      const resp = await fetch(`${BASE_URL}/api/email-sync`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mlsText: m.body }),
+      });
+      if (resp.ok) {
+        const result = await resp.json();
+        if (result.success && result.property) totalImported++;
+        else if (result.error) allErrors.push(`${m.subject}: ${result.error}`);
+      } else {
+        allErrors.push(`${m.subject}: HTTP ${resp.status}`);
+      }
+    }
+  }
+
   console.log(`\n✅ Done!`);
-  console.log(`   Imported: ${result.imported}`);
-  console.log(`   Skipped (duplicates): ${result.skipped}`);
-  if (result.errors?.length > 0) {
+  console.log(`   Imported: ${totalImported}`);
+  if (allErrors.length > 0) {
     console.log(`   Errors:`);
-    for (const err of result.errors) {
+    for (const err of allErrors) {
       console.log(`     ⚠️  ${err}`);
     }
   }

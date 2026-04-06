@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { importListingsFromEmail, importSingleListing, importListingFromUrl } from '@/lib/actions';
+import { importListingsFromEmail, importSingleListing, importListingFromUrl, analyzeProperty } from '@/lib/actions';
 import { extractListingUrls } from '@/lib/email-listing-parser';
+import prisma from '@/lib/db';
 
 /**
  * POST /api/email-sync
@@ -15,6 +16,25 @@ import { extractListingUrls } from '@/lib/email-listing-parser';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
+
+    // Mode -1: Raw MLS text from an email — use existing MLS parser/analyzer
+    if (body.mlsText && typeof body.mlsText === 'string') {
+      try {
+        // Dedupe by MLS ID if present
+        const mlsIdMatch = body.mlsText.match(/MLS\s*#?\s*[:=]?\s*(\d+)/i);
+        if (mlsIdMatch) {
+          const existing = await prisma.property.findFirst({ where: { mlsId: mlsIdMatch[1] } });
+          if (existing) {
+            return NextResponse.json({ success: true, skipped: true, property: existing });
+          }
+        }
+
+        const property = await analyzeProperty(body.mlsText);
+        return NextResponse.json({ success: true, imported: 1, property });
+      } catch (e: any) {
+        return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+      }
+    }
 
     // Mode 0: A single listing URL — fetch the page and import
     if (body.url && typeof body.url === 'string') {
