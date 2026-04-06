@@ -38,17 +38,117 @@ interface ExtractedListing {
   address: string;
   city: string;
   state: string;
+  zip: string;
   price: number;
   bedrooms: number;
   bathrooms: number;
   sqft: number;
+  yearBuilt: number;
+  hoaFee: number;
+  taxAnnual: number;
+  type: string;
   listingUrl: string;
   source: string;
   subject: string;
+  scraped: boolean;
+  scrapeError?: string;
 }
 
 const BASE_URL = process.env.APP_URL || 'http://localhost:3000';
-void BASE_URL; // unused now that we call actions directly
+void BASE_URL;
+
+// --- ScraperAPI helpers ---
+
+async function fetchViaScraperAPI(url: string): Promise<string> {
+  const apiKey = process.env.SCRAPER_API_KEY;
+  if (!apiKey) throw new Error('SCRAPER_API_KEY not set in .env');
+
+  const params = new URLSearchParams({
+    api_key: apiKey,
+    url,
+    premium: 'true',
+    render: 'true',
+    country_code: 'us',
+  });
+
+  const resp = await fetch(`https://api.scraperapi.com/?${params.toString()}`, {
+    signal: AbortSignal.timeout(90000),
+  });
+
+  if (!resp.ok) {
+    throw new Error(`ScraperAPI ${resp.status}: ${(await resp.text()).substring(0, 200)}`);
+  }
+  return await resp.text();
+}
+
+function parseZillowHtml(html: string): Partial<ExtractedListing> {
+  const result: Partial<ExtractedListing> = {};
+
+  // Zillow __NEXT_DATA__ blob has everything structured
+  const nextDataMatch = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+  if (nextDataMatch) {
+    try {
+      const nextData = JSON.parse(nextDataMatch[1]);
+      const findProperty = (obj: any, depth = 0): any => {
+        if (!obj || depth > 12 || typeof obj !== 'object') return null;
+        if (obj.price && (obj.bedrooms !== undefined || obj.livingArea !== undefined || obj.address)) {
+          return obj;
+        }
+        for (const key in obj) {
+          const found = findProperty(obj[key], depth + 1);
+          if (found) return found;
+        }
+        return null;
+      };
+
+      const prop = findProperty(nextData);
+      if (prop) {
+        result.price = typeof prop.price === 'number' ? prop.price : parseFloat(prop.price) || undefined;
+        result.bedrooms = prop.bedrooms || undefined;
+        result.bathrooms = prop.bathrooms || undefined;
+        result.sqft = prop.livingArea || prop.livingAreaValue || undefined;
+        result.yearBuilt = prop.yearBuilt || undefined;
+        result.hoaFee = prop.monthlyHoaFee || prop.hoaFee || 0;
+        if (prop.propertyTaxRate && prop.price) {
+          result.taxAnnual = Math.round(prop.price * prop.propertyTaxRate / 100);
+        }
+        if (prop.address) {
+          result.address = prop.address.streetAddress || undefined;
+          result.city = prop.address.city || undefined;
+          result.state = prop.address.state || undefined;
+          result.zip = prop.address.zipcode || undefined;
+        }
+        if (prop.homeType) {
+          result.type = /condo/i.test(prop.homeType) ? 'Condo'
+            : /single/i.test(prop.homeType) ? 'Single Family'
+            : /town/i.test(prop.homeType) ? 'Townhouse'
+            : /multi/i.test(prop.homeType) ? 'Multi-Family'
+            : 'Condo';
+        }
+      }
+    } catch {}
+  }
+
+  // Regex fallbacks
+  if (!result.price) {
+    const m = html.match(/"price"\s*:\s*(\d+)/);
+    if (m) result.price = parseInt(m[1]);
+  }
+  if (!result.hoaFee) {
+    const m = html.match(/"monthlyHoaFee"\s*:\s*(\d+)/) || html.match(/HOA[^$]{0,50}\$(\d+)\s*\/?\s*mo/i);
+    if (m) result.hoaFee = parseInt(m[1]);
+  }
+  if (!result.taxAnnual) {
+    const m = html.match(/"taxAnnualAmount"\s*:\s*(\d+)/) || html.match(/annual\s*tax[^$]{0,50}\$([\d,]+)/i);
+    if (m) result.taxAnnual = parseInt(String(m[1]).replace(/,/g, ''));
+  }
+  if (!result.yearBuilt) {
+    const m = html.match(/"yearBuilt"\s*:\s*(\d{4})/) || html.match(/built\s*in\s*(\d{4})/i);
+    if (m) result.yearBuilt = parseInt(m[1]);
+  }
+
+  return result;
+}
 
 // --- Gmail API helpers ---
 
@@ -334,14 +434,21 @@ async function main() {
     console.log(`   ✓ Resolved to ${unique.length} unique listings`);
   }
 
-  // Extract listing data — first try the URL slug (most reliable), then fall back
-  // to email subject/body patterns.
-  for (const canonical of unique) {
+  // Extract listing data: start from URL slug + email, then enrich via ScraperAPI
+  const useScraper = !!process.env.SCRAPER_API_KEY;
+  if (useScraper) {
+    console.log(`\n🔍 Enriching ${unique.length} listings via ScraperAPI (this can take a few minutes)...`);
+  } else {
+    console.log(`\n⚠️  SCRAPER_API_KEY not set — using basic data only (no HOA, tax, year built)`);
+  }
+
+  for (let i = 0; i < unique.length; i++) {
+    const canonical = unique[i];
     const ctx = canonicalToEmail.get(canonical);
     const subject = ctx?.subject || '';
     const body = ctx?.body || '';
 
-    // Primary: parse address from the Zillow URL slug
+    // Defaults from URL slug
     let address = '';
     let city = '';
     let state = 'MA';
@@ -353,28 +460,49 @@ async function main() {
       city = fromSlug.city;
       state = fromSlug.state;
       zip = fromSlug.zip;
-    } else {
-      // Fallback: parse from subject
-      const subjectWithAddr = subject.match(/^(?:A|An)\s+([A-Z][a-zA-Z\s]+?)\s+home\s+for\s+you:\s*(.+?)$/i);
-      if (subjectWithAddr) {
-        city = subjectWithAddr[1].trim();
-        address = subjectWithAddr[2].trim();
-      }
     }
 
-    // Price: look in email body near the listing URL, then subject, then anywhere
+    // Price from email body as fallback
     let price = 0;
     const priceInBody = body.match(/\$\s*([\d,]{5,})/);
     if (priceInBody) price = parseInt(priceInBody[1].replace(/,/g, '')) || 0;
-    if (!price) {
-      const priceInSubject = subject.match(/\$(\d{2,3})[Kk]\b/);
-      if (priceInSubject) price = parseInt(priceInSubject[1]) * 1000;
-    }
 
-    // Beds/baths/sqft from body
-    const beds = parseInt(body.match(/(\d+)\s*bd\b/i)?.[1] || '0') || 0;
-    const baths = parseFloat(body.match(/([\d.]+)\s*ba\b/i)?.[1] || '0') || 0;
-    const sqft = parseInt((body.match(/([\d,]+)\s*sqft/i)?.[1] || '0').replace(/,/g, '')) || 0;
+    let bedrooms = parseInt(body.match(/(\d+)\s*bd\b/i)?.[1] || '0') || 0;
+    let bathrooms = parseFloat(body.match(/([\d.]+)\s*ba\b/i)?.[1] || '0') || 0;
+    let sqft = parseInt((body.match(/([\d,]+)\s*sqft/i)?.[1] || '0').replace(/,/g, '')) || 0;
+    let yearBuilt = 0;
+    let hoaFee = 0;
+    let taxAnnual = 0;
+    let type = 'Condo';
+    let scraped = false;
+    let scrapeError: string | undefined;
+
+    // Enrich via ScraperAPI
+    if (useScraper) {
+      process.stdout.write(`   [${i + 1}/${unique.length}] ${canonical.substring(0, 70)}... `);
+      try {
+        const html = await fetchViaScraperAPI(canonical);
+        const parsed = parseZillowHtml(html);
+
+        if (parsed.address) address = parsed.address;
+        if (parsed.city) city = parsed.city;
+        if (parsed.state) state = parsed.state;
+        if (parsed.zip) zip = parsed.zip;
+        if (parsed.price && parsed.price > 0) price = parsed.price;
+        if (parsed.bedrooms) bedrooms = parsed.bedrooms;
+        if (parsed.bathrooms) bathrooms = parsed.bathrooms;
+        if (parsed.sqft) sqft = parsed.sqft;
+        if (parsed.yearBuilt) yearBuilt = parsed.yearBuilt;
+        if (parsed.hoaFee !== undefined) hoaFee = parsed.hoaFee;
+        if (parsed.taxAnnual) taxAnnual = parsed.taxAnnual;
+        if (parsed.type) type = parsed.type;
+        scraped = true;
+        console.log(`✅ ${address || 'unknown'} — $${price.toLocaleString()}${hoaFee ? ` · HOA $${hoaFee}/mo` : ''}`);
+      } catch (e: any) {
+        scrapeError = e?.message?.substring(0, 150) || String(e);
+        console.log(`❌ ${scrapeError}`);
+      }
+    }
 
     const zpid = zpidOf(canonical);
 
@@ -382,13 +510,20 @@ async function main() {
       address: address || 'Unknown',
       city: city || 'Unknown',
       state,
+      zip,
       price,
-      bedrooms: beds,
-      bathrooms: baths,
+      bedrooms,
+      bathrooms,
       sqft,
+      yearBuilt,
+      hoaFee,
+      taxAnnual,
+      type,
       listingUrl: canonical,
-      source: 'Zillow Email',
-      subject: subject + (zpid ? ` [zpid:${zpid}${zip ? ` zip:${zip}` : ''}]` : ''),
+      source: scraped ? 'Zillow (scraped)' : 'Zillow Email (basic)',
+      subject: subject + (zpid ? ` [zpid:${zpid}]` : ''),
+      scraped,
+      scrapeError,
     });
   }
 
