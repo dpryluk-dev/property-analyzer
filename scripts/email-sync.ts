@@ -21,8 +21,11 @@
  */
 
 import { extractListingUrls } from '../src/lib/email-listing-parser';
+import { importListingFromUrl, analyzeProperty } from '../src/lib/actions';
+import prisma from '../src/lib/db';
 
 const BASE_URL = process.env.APP_URL || 'http://localhost:3000';
+void BASE_URL; // unused now that we call actions directly
 
 // --- Gmail API helpers ---
 
@@ -273,39 +276,71 @@ async function main() {
   let totalImported = 0;
   const allErrors: string[] = [];
 
-  // Import aggregator URLs — server fetches each page and analyzes
+  // Import aggregator URLs — call the action directly (no HTTP, no dev server)
   if (unique.length > 0) {
-    console.log('📥 Fetching aggregator listing pages and importing...');
-    const resp = await fetch(`${BASE_URL}/api/email-sync`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ urls: unique }),
-    });
-
-    if (resp.ok) {
-      const result = await resp.json();
-      totalImported += result.imported || 0;
-      if (result.errors?.length) allErrors.push(...result.errors);
-    } else {
-      console.error(`   ❌ Import failed: ${resp.status} ${await resp.text()}`);
+    console.log(`📥 Importing ${unique.length} Zillow listings (via Claude web search)...`);
+    for (let i = 0; i < unique.length; i++) {
+      const url = unique[i];
+      process.stdout.write(`   [${i + 1}/${unique.length}] ${url.substring(0, 70)}... `);
+      try {
+        const result = await importListingFromUrl(url);
+        if (result.success && result.property) {
+          totalImported++;
+          console.log(`✅ ${result.property.address || 'imported'}`);
+        } else {
+          allErrors.push(`${url}: ${result.error}`);
+          console.log(`❌ ${result.error}`);
+        }
+      } catch (e: any) {
+        const msg = e?.message || String(e);
+        allErrors.push(`${url}: ${msg}`);
+        console.log(`❌ ${msg}`);
+      }
     }
   }
 
-  // Import MLS-format emails — each body goes through the existing MLS analyzer
+  // Import MLS-format emails — split on MLS IDs and analyze each chunk
   if (mlsBodies.length > 0) {
-    console.log('📥 Importing MLS-format listings...');
+    console.log(`\n📥 Importing ${mlsBodies.length} MLS-format email(s)...`);
     for (const m of mlsBodies) {
-      const resp = await fetch(`${BASE_URL}/api/email-sync`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mlsText: m.body }),
-      });
-      if (resp.ok) {
-        const result = await resp.json();
-        if (result.success && result.property) totalImported++;
-        else if (result.error) allErrors.push(`${m.subject}: ${result.error}`);
+      // Split on MLS ID markers if multiple listings in one email
+      const text = m.body;
+      const mlsIdRegex = /MLS\s*#?\s*:?\s*(\d{6,})/gi;
+      const mlsMatches = Array.from(text.matchAll(mlsIdRegex)) as RegExpMatchArray[];
+
+      const chunks: string[] = [];
+      if (mlsMatches.length > 1) {
+        for (let i = 0; i < mlsMatches.length; i++) {
+          const start = mlsMatches[i].index!;
+          const end = i + 1 < mlsMatches.length ? mlsMatches[i + 1].index! : text.length;
+          chunks.push(text.substring(Math.max(0, start - 500), end));
+        }
       } else {
-        allErrors.push(`${m.subject}: HTTP ${resp.status}`);
+        chunks.push(text);
+      }
+
+      for (const chunk of chunks) {
+        if (!/\$\s*[\d,]{4,}|list\s*price/i.test(chunk)) continue;
+
+        // Dedupe by MLS ID
+        const mlsIdMatch = chunk.match(/MLS\s*#?\s*:?\s*(\d{6,})/i);
+        if (mlsIdMatch) {
+          const existing = await prisma.property.findFirst({ where: { mlsId: mlsIdMatch[1] } });
+          if (existing) {
+            console.log(`   ⏭️  Skipped (already imported): MLS #${mlsIdMatch[1]}`);
+            continue;
+          }
+        }
+
+        try {
+          const property = await analyzeProperty(chunk);
+          totalImported++;
+          console.log(`   ✅ ${property.address || 'MLS listing'} — $${property.listPrice?.toLocaleString?.() || '?'}`);
+        } catch (e: any) {
+          const msg = e?.message || String(e);
+          allErrors.push(`MLS chunk: ${msg}`);
+          console.log(`   ❌ ${msg}`);
+        }
       }
     }
   }
@@ -320,7 +355,12 @@ async function main() {
   }
 }
 
-main().catch(e => {
-  console.error(`\n❌ Error: ${e.message}`);
-  process.exit(1);
-});
+main()
+  .then(async () => {
+    await prisma.$disconnect();
+  })
+  .catch(async e => {
+    await prisma.$disconnect();
+    console.error(`\n❌ Error: ${e.message}`);
+    process.exit(1);
+  });
