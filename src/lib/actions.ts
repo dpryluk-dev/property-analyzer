@@ -298,87 +298,131 @@ export async function dismissScoutedDeal(id: string) {
 
 // --- Listing Page Fetch & Import ---
 
+import Anthropic from '@anthropic-ai/sdk';
+
 /**
- * Fetch a listing page URL with browser-like headers, follow redirects
- * (Zillow/Redfin tracking links), and return the final URL + extracted text.
+ * Use the Anthropic web_search tool to fetch a listing URL and extract
+ * structured listing data. This bypasses Zillow/Redfin bot blocking by
+ * routing the fetch through Anthropic's infrastructure.
  */
-export async function fetchListingPage(url: string): Promise<{
+export async function fetchListingViaClaude(url: string): Promise<{
   finalUrl: string;
-  text: string;
+  mlsText: string;
   error?: string;
 }> {
   try {
-    const resp = await fetch(url, {
-      redirect: 'follow',
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept':
-          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
+    const client = new Anthropic();
+
+    // Extract zpid or id from URL for the search query
+    const zpid = url.match(/(\d+)_zpid/)?.[1];
+    const searchQuery = zpid
+      ? `Zillow homedetails ${zpid}`
+      : url;
+
+    const prompt = `Fetch this real estate listing URL and extract the listing details: ${url}
+
+${zpid ? `Search query hint: "${searchQuery}"` : ''}
+
+Extract the following fields and respond with ONLY a JSON object (no other text):
+{
+  "address": "street address",
+  "city": "city",
+  "state": "2-letter state code",
+  "zip": "zip code",
+  "price": number (list price in dollars),
+  "bedrooms": number,
+  "bathrooms": number,
+  "sqft": number (living area),
+  "yearBuilt": number,
+  "type": "Condo|Single Family|Multi-Family|Townhouse",
+  "hoaFee": number (monthly HOA, 0 if none),
+  "taxAnnual": number (annual property tax, 0 if unknown),
+  "description": "brief description including HOA inclusions, parking, etc."
+}
+
+If you cannot fetch the page, use null for unknown fields but always include a numeric price.`;
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      system: 'You extract structured real estate listing data. Respond with ONLY valid JSON, no other text.',
+      tools: [{ type: 'web_search_20250305' as any, name: 'web_search' }],
+      messages: [{ role: 'user', content: prompt }],
     });
 
-    if (!resp.ok) {
-      return {
-        finalUrl: resp.url || url,
-        text: '',
-        error: `HTTP ${resp.status}: ${resp.statusText}`,
-      };
+    const allText = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map(b => b.text)
+      .join('\n');
+
+    if (!allText.trim()) {
+      return { finalUrl: url, mlsText: '', error: 'Empty response from Claude' };
     }
 
-    const html = await resp.text();
+    const cleaned = allText.replace(/```json?\s*/gi, '').replace(/```/g, '').trim();
 
-    // Extract JSON-LD blocks first (most structured data)
-    const jsonLdBlocks = Array.from(
-      html.matchAll(/<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi),
-    ).map(m => m[1]);
-
-    // Strip scripts/styles/tags to get readable text
-    let text = html
-      .replace(/<script[\s\S]*?<\/script>/gi, ' ')
-      .replace(/<style[\s\S]*?<\/style>/gi, ' ')
-      .replace(/<!--[\s\S]*?-->/g, ' ')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&quot;/g, '"')
-      .replace(/&#39;/g, "'")
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    // Prepend any JSON-LD so the parser can pick up structured fields
-    if (jsonLdBlocks.length > 0) {
-      text = jsonLdBlocks.join('\n') + '\n\n' + text;
+    // Extract JSON using brace depth counting
+    let depth = 0, start = -1;
+    let extracted: any = null;
+    for (let i = 0; i < cleaned.length; i++) {
+      if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
+      else if (cleaned[i] === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          try { extracted = JSON.parse(cleaned.substring(start, i + 1)); } catch {}
+          break;
+        }
+      }
     }
 
-    return { finalUrl: resp.url || url, text: text.substring(0, 50000) };
+    if (!extracted || !extracted.price) {
+      return { finalUrl: url, mlsText: '', error: 'Could not extract listing data' };
+    }
+
+    // Convert structured data to synthetic MLS text for the existing parser
+    const mlsText = [
+      `List Price: $${Number(extracted.price).toLocaleString()}`,
+      extracted.address ? `Address: ${extracted.address}` : '',
+      extracted.city ? `City: ${extracted.city}` : '',
+      extracted.state ? `State: ${extracted.state}` : '',
+      extracted.zip ? `Zip: ${extracted.zip}` : '',
+      `Type: ${extracted.type || 'Condo'}`,
+      extracted.bedrooms ? `Bedrooms: ${extracted.bedrooms}` : '',
+      extracted.bathrooms ? `Bathrooms: ${extracted.bathrooms}` : '',
+      extracted.sqft ? `Living Area: ${extracted.sqft} sqft` : '',
+      extracted.yearBuilt ? `Year Built: ${extracted.yearBuilt}` : '',
+      extracted.hoaFee ? `HOA Fee: $${extracted.hoaFee} monthly` : '',
+      extracted.taxAnnual ? `Tax: $${extracted.taxAnnual}` : '',
+      extracted.description || '',
+    ].filter(Boolean).join('\n');
+
+    return { finalUrl: url, mlsText };
   } catch (e: any) {
-    return { finalUrl: url, text: '', error: e?.message || String(e) };
+    const msg = e?.message || String(e);
+    if (msg.includes('credit') || msg.includes('balance') || msg.includes('billing')) {
+      return { finalUrl: url, mlsText: '', error: 'Anthropic API credits exhausted' };
+    }
+    return { finalUrl: url, mlsText: '', error: msg };
   }
 }
 
 /**
- * Fetch a listing URL, extract page content, run ROI analysis, and save.
+ * Fetch a listing URL via Claude web_search, run ROI analysis, and save.
  */
 export async function importListingFromUrl(url: string): Promise<{
   success: boolean;
   error?: string;
   property?: any;
 }> {
-  const fetched = await fetchListingPage(url);
+  const fetched = await fetchListingViaClaude(url);
 
-  if (fetched.error || !fetched.text) {
-    return { success: false, error: fetched.error || 'Empty page content' };
+  if (fetched.error || !fetched.mlsText) {
+    return { success: false, error: fetched.error || 'Empty listing data' };
   }
 
   try {
-    // Use the existing analyzer on the fetched page text
-    const property = await analyzeProperty(fetched.text);
+    const property = await analyzeProperty(fetched.mlsText);
 
-    // Attach the listing URL (use the final URL after redirects)
     await prisma.property.update({
       where: { id: property.id },
       data: { listingUrl: fetched.finalUrl },

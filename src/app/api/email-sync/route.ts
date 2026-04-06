@@ -17,23 +17,65 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    // Mode -1: Raw MLS text from an email — use existing MLS parser/analyzer
+    // Mode -1: Raw MLS text from an email — may contain multiple listings
     if (body.mlsText && typeof body.mlsText === 'string') {
-      try {
-        // Dedupe by MLS ID if present
-        const mlsIdMatch = body.mlsText.match(/MLS\s*#?\s*[:=]?\s*(\d+)/i);
+      // MLS broker emails often contain multiple listings. Split on MLS ID markers.
+      // Common split markers: "MLS #12345", "MLS#: 12345", or multiple "List Price:" occurrences.
+      const text = body.mlsText;
+
+      // Find all MLS IDs and their positions
+      const mlsIdRegex = /MLS\s*#?\s*:?\s*(\d{6,})/gi;
+      const mlsMatches = Array.from(text.matchAll(mlsIdRegex)) as RegExpMatchArray[];
+
+      // If multiple MLS IDs found, split into individual listings
+      const chunks: string[] = [];
+      if (mlsMatches.length > 1) {
+        for (let i = 0; i < mlsMatches.length; i++) {
+          const start = mlsMatches[i].index!;
+          const end = i + 1 < mlsMatches.length ? mlsMatches[i + 1].index! : text.length;
+          // Include ~500 chars before the MLS ID to capture address/price that may precede it
+          const chunkStart = Math.max(0, start - 500);
+          chunks.push(text.substring(chunkStart, end));
+        }
+      } else {
+        chunks.push(text);
+      }
+
+      const results: any[] = [];
+      const errors: string[] = [];
+      let imported = 0;
+      let skipped = 0;
+
+      for (const chunk of chunks) {
+        // Skip chunks with no price
+        if (!/\$\s*[\d,]{4,}|list\s*price/i.test(chunk)) continue;
+
+        // Dedupe by MLS ID
+        const mlsIdMatch = chunk.match(/MLS\s*#?\s*:?\s*(\d{6,})/i);
         if (mlsIdMatch) {
           const existing = await prisma.property.findFirst({ where: { mlsId: mlsIdMatch[1] } });
           if (existing) {
-            return NextResponse.json({ success: true, skipped: true, property: existing });
+            skipped++;
+            continue;
           }
         }
 
-        const property = await analyzeProperty(body.mlsText);
-        return NextResponse.json({ success: true, imported: 1, property });
-      } catch (e: any) {
-        return NextResponse.json({ success: false, error: e?.message || String(e) }, { status: 500 });
+        try {
+          const property = await analyzeProperty(chunk);
+          results.push(property);
+          imported++;
+        } catch (e: any) {
+          errors.push(`MLS chunk: ${e?.message || String(e)}`);
+        }
       }
+
+      return NextResponse.json({
+        success: errors.length === 0,
+        imported,
+        skipped,
+        errors,
+        properties: results,
+      });
     }
 
     // Mode 0: A single listing URL — fetch the page and import
