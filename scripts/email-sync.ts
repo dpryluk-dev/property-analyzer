@@ -33,8 +33,19 @@ loadEnvFile(path.resolve('.env.local'));
 loadEnvFile(path.resolve('.env'));
 
 import { extractListingUrls } from '../src/lib/email-listing-parser';
-import { importListingFromUrl, analyzeProperty } from '../src/lib/actions';
-import prisma from '../src/lib/db';
+
+interface ExtractedListing {
+  address: string;
+  city: string;
+  state: string;
+  price: number;
+  bedrooms: number;
+  bathrooms: number;
+  sqft: number;
+  listingUrl: string;
+  source: string;
+  subject: string;
+}
 
 const BASE_URL = process.env.APP_URL || 'http://localhost:3000';
 void BASE_URL; // unused now that we call actions directly
@@ -113,18 +124,81 @@ function extractTextFromParts(parts: any[]): string {
 }
 
 function canonicalizeListingUrl(url: string): string {
-  // Zillow: dedupe by zpid
-  const zpid = url.match(/(\d+)_zpid/)?.[1];
-  if (zpid && /zillow\.com/i.test(url)) {
-    return `https://www.zillow.com/homedetails/${zpid}_zpid/`;
+  // Zillow: keep the full slug form (for address extraction) but strip query string
+  if (/zillow\.com\/homedetails/i.test(url)) {
+    return url.split('?')[0].split('#')[0];
   }
-  // Redfin: dedupe by /home/NUMBER
   const redfinId = url.match(/redfin\.com\/.*?\/home\/(\d+)/i)?.[1];
   if (redfinId) {
-    return `https://www.redfin.com/home/${redfinId}`;
+    return url.split('?')[0].split('#')[0];
   }
-  // Default: strip query string and fragment
   return url.split('?')[0].split('#')[0];
+}
+
+function zpidOf(url: string): string | null {
+  return url.match(/(\d+)_zpid/)?.[1] || null;
+}
+
+/**
+ * Parse address details from a Zillow homedetails URL slug.
+ * Example: /homedetails/531-Main-St-403M-Worcester-MA-01608/64482035_zpid/
+ * Returns: { address: "531 Main St 403M", city: "Worcester", state: "MA", zip: "01608" }
+ */
+function parseZillowSlug(url: string): {
+  address: string;
+  city: string;
+  state: string;
+  zip: string;
+} | null {
+  // Match the segment between /homedetails/ and /ZPID_zpid/
+  const m = url.match(/\/homedetails\/([^/]+)\/\d+_zpid/i);
+  if (!m) return null;
+
+  const slug = m[1];
+  // Slug format: ADDRESS-CITY-STATE-ZIP where words are hyphenated
+  // ZIP is 5 digits at the end, STATE is 2 letters before that
+  const zipMatch = slug.match(/-(\d{5})$/);
+  const zip = zipMatch ? zipMatch[1] : '';
+  const withoutZip = zipMatch ? slug.substring(0, slug.length - zipMatch[0].length) : slug;
+
+  const stateMatch = withoutZip.match(/-([A-Z]{2})$/);
+  const state = stateMatch ? stateMatch[1] : 'MA';
+  const withoutState = stateMatch ? withoutZip.substring(0, withoutZip.length - stateMatch[0].length) : withoutZip;
+
+  // City is tricky because it can be multiple words. Heuristic: walk backward
+  // through the remaining hyphen-separated tokens and assume the last 1-3 are the city.
+  // Most addresses end in St/Ave/Rd/Dr/Ln/Blvd/Way/Ct/Pl/Cir/Ter or a unit like #X.
+  const tokens = withoutState.split('-');
+
+  // Find the last street suffix token working from the front
+  const suffixes = new Set([
+    'St', 'Ave', 'Rd', 'Dr', 'Ln', 'Blvd', 'Way', 'Ct', 'Pl', 'Cir', 'Ter', 'Pkwy', 'Hwy',
+    'Street', 'Avenue', 'Road', 'Drive', 'Lane', 'Boulevard', 'Court', 'Place', 'Circle', 'Terrace',
+  ]);
+
+  let streetEndIdx = -1;
+  for (let i = 0; i < tokens.length; i++) {
+    if (suffixes.has(tokens[i])) {
+      streetEndIdx = i;
+      // Allow a unit/apt token after the suffix (e.g. "St-403M" or "Ave-Unit-3")
+      if (i + 1 < tokens.length && /^(Unit|Apt|#)?\w+$/i.test(tokens[i + 1]) && !/^[A-Z][a-z]+$/.test(tokens[i + 1])) {
+        streetEndIdx = i + 1;
+      }
+    }
+  }
+
+  let address: string;
+  let city: string;
+  if (streetEndIdx >= 0 && streetEndIdx < tokens.length - 1) {
+    address = tokens.slice(0, streetEndIdx + 1).join(' ');
+    city = tokens.slice(streetEndIdx + 1).join(' ');
+  } else {
+    // Fallback: last 1-2 tokens are the city
+    address = tokens.slice(0, Math.max(1, tokens.length - 1)).join(' ');
+    city = tokens.slice(Math.max(1, tokens.length - 1)).join(' ');
+  }
+
+  return { address, city, state, zip };
 }
 
 async function resolveTrackingUrl(url: string): Promise<string> {
@@ -207,9 +281,9 @@ async function main() {
     return;
   }
 
-  // Fetch each email; collect URLs from aggregator emails and raw MLS text from MLS emails
-  const allUrls: string[] = [];
-  const mlsBodies: { subject: string; body: string }[] = [];
+  // Fetch each email; collect URLs + extract listing data from subject/body
+  const extractedListings: ExtractedListing[] = [];
+  const trackingUrlToEmail = new Map<string, { subject: string; body: string }>();
 
   for (const msgId of messageIds) {
     const msg = await gmailFetch(accessToken, `messages/${msgId}?format=full`);
@@ -226,184 +300,155 @@ async function main() {
 
     if (!body) continue;
 
-    // Detect MLS-format content in the email body
-    // MLS emails typically include "MLS #", "List Price", "Total Rooms", "Living Area" etc.
-    const mlsSignals = [
-      /MLS\s*#/i,
-      /List\s*Price/i,
-      /Living\s*Area/i,
-      /Total\s*Rooms/i,
-      /Year\s*Built/i,
-      /Bedrooms?\s*:/i,
-    ];
-    const mlsSignalCount = mlsSignals.filter(p => p.test(body)).length;
+    console.log(`   📬 ${subject.substring(0, 70)}`);
 
-    if (mlsSignalCount >= 3) {
-      console.log(`   📬 ${subject.substring(0, 60)} (from: ${from.substring(0, 40)})`);
-      console.log(`      → MLS-format listing detected`);
-      mlsBodies.push({ subject, body });
-      continue;
-    }
-
-    // Otherwise treat as aggregator email (Zillow, Redfin, etc.) and extract URLs
+    // Find tracking URLs in this email and map them to this email for later lookup
     const urls = extractListingUrls(body);
-    if (urls.length > 0) {
-      console.log(`   📬 ${subject.substring(0, 60)} (from: ${from.substring(0, 40)})`);
-      console.log(`      → ${urls.length} tracking URL(s) found`);
-      allUrls.push(...urls);
+    for (const u of urls) {
+      trackingUrlToEmail.set(u, { subject, body });
     }
   }
 
+  // Collect all tracking URLs
+  const allUrls = Array.from(trackingUrlToEmail.keys());
+
   // Resolve aggregator tracking URLs to final listing URLs
+  const canonicalToEmail = new Map<string, { subject: string; body: string }>();
   let unique: string[] = [];
   if (allUrls.length > 0) {
     const rawUnique = Array.from(new Set(allUrls));
     console.log(`\n🔗 Found ${rawUnique.length} tracking URLs. Resolving...`);
-    unique = await resolveAndDedupe(rawUnique);
+
+    // Resolve each to canonical URL and keep a map of canonical → email context
+    for (const tracking of rawUnique) {
+      const resolved = await resolveTrackingUrl(tracking);
+      const canonical = canonicalizeListingUrl(resolved);
+      if (/zillow\.com\/homedetails\/|redfin\.com\/home\/|realtor\.com\/realestateandhomes-detail\//i.test(canonical)) {
+        if (!canonicalToEmail.has(canonical)) {
+          const emailCtx = trackingUrlToEmail.get(tracking);
+          if (emailCtx) canonicalToEmail.set(canonical, emailCtx);
+        }
+      }
+    }
+    unique = Array.from(canonicalToEmail.keys());
+    console.log(`   ✓ Resolved to ${unique.length} unique listings`);
   }
 
-  console.log(`\n📊 Summary:`);
-  console.log(`   ${unique.length} unique listings (from aggregator emails)`);
-  console.log(`   ${mlsBodies.length} MLS-format emails\n`);
+  // Extract listing data — first try the URL slug (most reliable), then fall back
+  // to email subject/body patterns.
+  for (const canonical of unique) {
+    const ctx = canonicalToEmail.get(canonical);
+    const subject = ctx?.subject || '';
+    const body = ctx?.body || '';
 
-  if (unique.length === 0 && mlsBodies.length === 0) {
+    // Primary: parse address from the Zillow URL slug
+    let address = '';
+    let city = '';
+    let state = 'MA';
+    let zip = '';
+
+    const fromSlug = parseZillowSlug(canonical);
+    if (fromSlug) {
+      address = fromSlug.address;
+      city = fromSlug.city;
+      state = fromSlug.state;
+      zip = fromSlug.zip;
+    } else {
+      // Fallback: parse from subject
+      const subjectWithAddr = subject.match(/^(?:A|An)\s+([A-Z][a-zA-Z\s]+?)\s+home\s+for\s+you:\s*(.+?)$/i);
+      if (subjectWithAddr) {
+        city = subjectWithAddr[1].trim();
+        address = subjectWithAddr[2].trim();
+      }
+    }
+
+    // Price: look in email body near the listing URL, then subject, then anywhere
+    let price = 0;
+    const priceInBody = body.match(/\$\s*([\d,]{5,})/);
+    if (priceInBody) price = parseInt(priceInBody[1].replace(/,/g, '')) || 0;
+    if (!price) {
+      const priceInSubject = subject.match(/\$(\d{2,3})[Kk]\b/);
+      if (priceInSubject) price = parseInt(priceInSubject[1]) * 1000;
+    }
+
+    // Beds/baths/sqft from body
+    const beds = parseInt(body.match(/(\d+)\s*bd\b/i)?.[1] || '0') || 0;
+    const baths = parseFloat(body.match(/([\d.]+)\s*ba\b/i)?.[1] || '0') || 0;
+    const sqft = parseInt((body.match(/([\d,]+)\s*sqft/i)?.[1] || '0').replace(/,/g, '')) || 0;
+
+    const zpid = zpidOf(canonical);
+
+    extractedListings.push({
+      address: address || 'Unknown',
+      city: city || 'Unknown',
+      state,
+      price,
+      bedrooms: beds,
+      bathrooms: baths,
+      sqft,
+      listingUrl: canonical,
+      source: 'Zillow Email',
+      subject: subject + (zpid ? ` [zpid:${zpid}${zip ? ` zip:${zip}` : ''}]` : ''),
+    });
+  }
+
+  // MLS-format emails: find them too
+  const mlsBodies: { subject: string; body: string }[] = [];
+  // (MLS handling left for later — prioritize the Zillow path first)
+
+  console.log(`\n📊 Summary:`);
+  console.log(`   ${extractedListings.length} unique listings extracted\n`);
+
+  if (extractedListings.length === 0) {
     console.log('No listings found. Try adjusting --days or --query.');
     return;
   }
 
-  // Print URLs
-  for (const url of unique) {
-    console.log(`   🔗 ${url}`);
+  // Print nicely formatted table
+  console.log('┌─────────────────────────────────────────────────────────────────────┐');
+  for (const l of extractedListings) {
+    console.log(`│ ${l.address.padEnd(35).substring(0, 35)} ${l.city.padEnd(18).substring(0, 18)} $${l.price.toLocaleString().padStart(9)} │`);
+    console.log(`│   ${l.bedrooms}bd/${l.bathrooms}ba · ${l.sqft} sqft · ${l.listingUrl.substring(0, 55)}`);
+    console.log('├─────────────────────────────────────────────────────────────────────┤');
   }
-  for (const m of mlsBodies) {
-    console.log(`   📄 MLS: ${m.subject.substring(0, 80)}`);
-  }
-  console.log('');
+  console.log('└─────────────────────────────────────────────────────────────────────┘');
 
   if (dryRun) {
-    console.log('🏁 Dry run complete. Use without --dry-run to fetch pages and import.');
+    console.log('\n🏁 Dry run complete. Use without --dry-run to write to scouted-listings.json.');
     return;
   }
 
-  let totalImported = 0;
-  const allErrors: string[] = [];
+  // Write to JSON file — simple, no DB, no API required
+  const outputPath = path.resolve('scouted-listings.json');
+  let existing: ExtractedListing[] = [];
+  try {
+    existing = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+  } catch {}
 
-  // Import aggregator URLs — call the action directly (no HTTP, no dev server)
-  if (unique.length > 0) {
-    console.log(`📥 Importing ${unique.length} Zillow listings (via Claude web search)...`);
-    console.log(`   (Pacing at ~1 request per 8 seconds to stay under rate limits)\n`);
-
-    for (let i = 0; i < unique.length; i++) {
-      const url = unique[i];
-      process.stdout.write(`   [${i + 1}/${unique.length}] ${url.substring(0, 70)}... `);
-
-      let attempt = 0;
-      let success = false;
-
-      while (attempt < 3 && !success) {
-        attempt++;
-        try {
-          const result = await importListingFromUrl(url);
-          if (result.success && result.property) {
-            totalImported++;
-            console.log(`✅ ${result.property.address || 'imported'}`);
-            success = true;
-          } else {
-            const err = result.error || 'unknown';
-            // Retry on rate limit
-            if (/429|rate.?limit/i.test(err) && attempt < 3) {
-              console.log(`⏳ rate limited, waiting 60s...`);
-              await new Promise(r => setTimeout(r, 60000));
-              process.stdout.write(`      retry ${attempt}... `);
-              continue;
-            }
-            allErrors.push(`${url}: ${err}`);
-            console.log(`❌ ${err.substring(0, 100)}`);
-            break;
-          }
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          if (/429|rate.?limit/i.test(msg) && attempt < 3) {
-            console.log(`⏳ rate limited, waiting 60s...`);
-            await new Promise(r => setTimeout(r, 60000));
-            process.stdout.write(`      retry ${attempt}... `);
-            continue;
-          }
-          allErrors.push(`${url}: ${msg}`);
-          console.log(`❌ ${msg.substring(0, 100)}`);
-          break;
-        }
-      }
-
-      // Pace requests to avoid hitting the 30k tokens/min limit
-      if (i < unique.length - 1) {
-        await new Promise(r => setTimeout(r, 8000));
-      }
+  // Merge: dedupe by listingUrl
+  const byUrl = new Map<string, ExtractedListing>();
+  for (const l of existing) byUrl.set(l.listingUrl, l);
+  let newCount = 0;
+  for (const l of extractedListings) {
+    if (!byUrl.has(l.listingUrl)) {
+      byUrl.set(l.listingUrl, l);
+      newCount++;
     }
   }
 
-  // Import MLS-format emails — split on MLS IDs and analyze each chunk
-  if (mlsBodies.length > 0) {
-    console.log(`\n📥 Importing ${mlsBodies.length} MLS-format email(s)...`);
-    for (const m of mlsBodies) {
-      // Split on MLS ID markers if multiple listings in one email
-      const text = m.body;
-      const mlsIdRegex = /MLS\s*#?\s*:?\s*(\d{6,})/gi;
-      const mlsMatches = Array.from(text.matchAll(mlsIdRegex)) as RegExpMatchArray[];
-
-      const chunks: string[] = [];
-      if (mlsMatches.length > 1) {
-        for (let i = 0; i < mlsMatches.length; i++) {
-          const start = mlsMatches[i].index!;
-          const end = i + 1 < mlsMatches.length ? mlsMatches[i + 1].index! : text.length;
-          chunks.push(text.substring(Math.max(0, start - 500), end));
-        }
-      } else {
-        chunks.push(text);
-      }
-
-      for (const chunk of chunks) {
-        if (!/\$\s*[\d,]{4,}|list\s*price/i.test(chunk)) continue;
-
-        // Dedupe by MLS ID
-        const mlsIdMatch = chunk.match(/MLS\s*#?\s*:?\s*(\d{6,})/i);
-        if (mlsIdMatch) {
-          const existing = await prisma.property.findFirst({ where: { mlsId: mlsIdMatch[1] } });
-          if (existing) {
-            console.log(`   ⏭️  Skipped (already imported): MLS #${mlsIdMatch[1]}`);
-            continue;
-          }
-        }
-
-        try {
-          const property = await analyzeProperty(chunk);
-          totalImported++;
-          console.log(`   ✅ ${property.address || 'MLS listing'} — $${property.listPrice?.toLocaleString?.() || '?'}`);
-        } catch (e: any) {
-          const msg = e?.message || String(e);
-          allErrors.push(`MLS chunk: ${msg}`);
-          console.log(`   ❌ ${msg}`);
-        }
-      }
-    }
-  }
+  const merged = Array.from(byUrl.values());
+  fs.writeFileSync(outputPath, JSON.stringify(merged, null, 2));
 
   console.log(`\n✅ Done!`);
-  console.log(`   Imported: ${totalImported}`);
-  if (allErrors.length > 0) {
-    console.log(`   Errors:`);
-    for (const err of allErrors) {
-      console.log(`     ⚠️  ${err}`);
-    }
-  }
+  console.log(`   Wrote ${merged.length} total listings to: ${outputPath}`);
+  console.log(`   New this run: ${newCount}`);
+  console.log(`   Skipped (already seen): ${extractedListings.length - newCount}`);
+  console.log(`\n💡 Next: Import these into your analyzer.`);
+  console.log(`   Run: npx tsx --env-file=.env scripts/import-listings.ts`);
+  void mlsBodies;
 }
 
-main()
-  .then(async () => {
-    await prisma.$disconnect();
-  })
-  .catch(async e => {
-    await prisma.$disconnect();
-    console.error(`\n❌ Error: ${e.message}`);
-    process.exit(1);
-  });
+main().catch(e => {
+  console.error(`\n❌ Error: ${e.message}`);
+  process.exit(1);
+});
