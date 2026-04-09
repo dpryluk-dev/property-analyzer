@@ -975,7 +975,33 @@ async function main() {
             if (parsed.mlsId) {
               const existing = await prisma.property.findFirst({ where: { mlsId: parsed.mlsId } });
               if (existing) {
-                console.log(`   ⏭️  ${parsed.address || existing.address} — already in portfolio (MLS #${parsed.mlsId})`);
+                // Backfill listingUrl if missing
+                if (!existing.listingUrl) {
+                  const urlMatches = chunk.match(/https?:\/\/\S+/gi) || [];
+                  let backfillUrl: string | null = null;
+                  for (const u of urlMatches) {
+                    const clean = u.replace(/[>\s)"'.,;]+$/, '');
+                    if (/mlspin\.com|pinergy|zillow\.com\/homedetails|redfin\.com\/home/i.test(clean)) {
+                      backfillUrl = clean;
+                      break;
+                    }
+                  }
+                  if (!backfillUrl && parsed.address) {
+                    const q = encodeURIComponent(`${parsed.address}, ${parsed.city || ''} ${parsed.state || 'MA'} ${parsed.zip || ''}`.trim());
+                    backfillUrl = `https://www.zillow.com/homes/${q}_rb/`;
+                  }
+                  if (backfillUrl) {
+                    await prisma.property.update({
+                      where: { id: existing.id },
+                      data: { listingUrl: backfillUrl },
+                    });
+                    console.log(`   ⏭️  ${parsed.address || existing.address} — already in portfolio (URL backfilled)`);
+                  } else {
+                    console.log(`   ⏭️  ${parsed.address || existing.address} — already in portfolio (MLS #${parsed.mlsId})`);
+                  }
+                } else {
+                  console.log(`   ⏭️  ${parsed.address || existing.address} — already in portfolio (MLS #${parsed.mlsId})`);
+                }
                 status.imported++; // count as success for trash logic
                 skippedCount++;
                 continue;
@@ -983,6 +1009,25 @@ async function main() {
             }
 
             process.stdout.write(`   ${(parsed.address || 'Unknown').substring(0, 45).padEnd(45)} `);
+
+            // Try to find a listing URL in the chunk: any http(s) URL pointing
+            // to MLSpin/Pinergy/Zillow/Redfin. Prefer the first MLSpin link,
+            // otherwise fall back to constructing a Zillow search URL from the
+            // parsed address so the user can click through.
+            let mlsListingUrl: string | null = null;
+            const urlMatches = chunk.match(/https?:\/\/\S+/gi) || [];
+            for (const u of urlMatches) {
+              const clean = u.replace(/[>\s)"'.,;]+$/, '');
+              if (/mlspin\.com|pinergy|zillow\.com\/homedetails|redfin\.com\/home|realtor\.com\/realestateandhomes/i.test(clean)) {
+                mlsListingUrl = clean;
+                break;
+              }
+            }
+            if (!mlsListingUrl && parsed.address) {
+              // Build a Zillow search URL as a fallback
+              const q = encodeURIComponent(`${parsed.address}, ${parsed.city || ''} ${parsed.state || 'MA'} ${parsed.zip || ''}`.trim());
+              mlsListingUrl = `https://www.zillow.com/homes/${q}_rb/`;
+            }
 
             // Rent research via Claude
             const rentData = await researchRent(parsed);
@@ -1012,6 +1057,7 @@ async function main() {
                 taxAnnual: parsed.taxAnnual,
                 taxYear: parsed.taxYear,
                 assessed: parsed.assessed || null,
+                listingUrl: mlsListingUrl,
                 parking: parsed.parking,
                 dom: parsed.dom,
                 rawMls: chunk.substring(0, 50000),
