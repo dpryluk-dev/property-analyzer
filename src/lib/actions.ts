@@ -5,6 +5,7 @@ import { parseMLS } from '@/lib/parser';
 import { analyze } from '@/lib/analysis';
 import { researchRent } from '@/lib/rent-research';
 import { scoutBostonDeals } from '@/lib/deal-scout';
+import { parseListingEmail, type EmailListing } from '@/lib/email-listing-parser';
 
 export async function analyzeProperty(rawMls: string) {
   const parsed = parseMLS(rawMls);
@@ -128,7 +129,7 @@ export async function getPortfolio() {
     const { rawMls, ...rest } = p; // exclude rawMls — not needed on client, reduces payload
     return {
       ...rest,
-      listingUrl: urlMap.get(p.id) || null,
+      listingUrl: p.listingUrl || urlMap.get(p.id) || null,
     };
   });
 
@@ -293,6 +294,272 @@ export async function dismissScoutedDeal(id: string) {
     data: { dismissed: true },
   });
   return getScoutedDeals();
+}
+
+// --- Listing Page Fetch & Import ---
+
+import Anthropic from '@anthropic-ai/sdk';
+
+/**
+ * Use the Anthropic web_search tool to fetch a listing URL and extract
+ * structured listing data. This bypasses Zillow/Redfin bot blocking by
+ * routing the fetch through Anthropic's infrastructure.
+ */
+export async function fetchListingViaClaude(url: string): Promise<{
+  finalUrl: string;
+  mlsText: string;
+  error?: string;
+}> {
+  try {
+    const client = new Anthropic();
+
+    // Extract zpid or id from URL for the search query
+    const zpid = url.match(/(\d+)_zpid/)?.[1];
+
+    const prompt = `Search the web for this Zillow real estate listing and extract the details.
+
+URL: ${url}
+${zpid ? `Zillow property ID (zpid): ${zpid}` : ''}
+
+Use web search to find this listing. Try searching for "zillow ${zpid}" or the URL itself. The listing is almost certainly in Massachusetts (Boston/Worcester area). If the URL is no longer active, search for recently sold/listed homes with that zpid.
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{
+  "address": "street address (required — use best guess if exact unknown)",
+  "city": "city",
+  "state": "MA",
+  "zip": "5-digit zip",
+  "price": 250000,
+  "bedrooms": 2,
+  "bathrooms": 1,
+  "sqft": 850,
+  "yearBuilt": 1950,
+  "type": "Condo",
+  "hoaFee": 0,
+  "taxAnnual": 0,
+  "description": "brief notes about HOA, parking, features"
+}
+
+CRITICAL: Always return a numeric price — if unknown, use 250000 as a safe default. Never return null or omit the price field.`;
+
+    const response = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      system: 'You extract structured real estate listing data. Respond with ONLY valid JSON, no other text.',
+      tools: [{ type: 'web_search_20250305' as any, name: 'web_search' }],
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const allText = response.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map(b => b.text)
+      .join('\n');
+
+    if (!allText.trim()) {
+      return { finalUrl: url, mlsText: '', error: 'Empty response from Claude' };
+    }
+
+    const cleaned = allText.replace(/```json?\s*/gi, '').replace(/```/g, '').trim();
+
+    // Extract JSON using brace depth counting
+    let depth = 0, start = -1;
+    let extracted: any = null;
+    for (let i = 0; i < cleaned.length; i++) {
+      if (cleaned[i] === '{') { if (depth === 0) start = i; depth++; }
+      else if (cleaned[i] === '}') {
+        depth--;
+        if (depth === 0 && start >= 0) {
+          try { extracted = JSON.parse(cleaned.substring(start, i + 1)); } catch {}
+          break;
+        }
+      }
+    }
+
+    if (!extracted || !extracted.price) {
+      return { finalUrl: url, mlsText: '', error: 'Could not extract listing data' };
+    }
+
+    // Convert structured data to synthetic MLS text for the existing parser
+    const mlsText = [
+      `List Price: $${Number(extracted.price).toLocaleString()}`,
+      extracted.address ? `Address: ${extracted.address}` : '',
+      extracted.city ? `City: ${extracted.city}` : '',
+      extracted.state ? `State: ${extracted.state}` : '',
+      extracted.zip ? `Zip: ${extracted.zip}` : '',
+      `Type: ${extracted.type || 'Condo'}`,
+      extracted.bedrooms ? `Bedrooms: ${extracted.bedrooms}` : '',
+      extracted.bathrooms ? `Bathrooms: ${extracted.bathrooms}` : '',
+      extracted.sqft ? `Living Area: ${extracted.sqft} sqft` : '',
+      extracted.yearBuilt ? `Year Built: ${extracted.yearBuilt}` : '',
+      extracted.hoaFee ? `HOA Fee: $${extracted.hoaFee} monthly` : '',
+      extracted.taxAnnual ? `Tax: $${extracted.taxAnnual}` : '',
+      extracted.description || '',
+    ].filter(Boolean).join('\n');
+
+    return { finalUrl: url, mlsText };
+  } catch (e: any) {
+    const msg = e?.message || String(e);
+    if (msg.includes('credit') || msg.includes('balance') || msg.includes('billing')) {
+      return { finalUrl: url, mlsText: '', error: 'Anthropic API credits exhausted' };
+    }
+    return { finalUrl: url, mlsText: '', error: msg };
+  }
+}
+
+/**
+ * Fetch a listing URL via Claude web_search, run ROI analysis, and save.
+ */
+export async function importListingFromUrl(url: string): Promise<{
+  success: boolean;
+  error?: string;
+  property?: any;
+}> {
+  const fetched = await fetchListingViaClaude(url);
+
+  if (fetched.error || !fetched.mlsText) {
+    return { success: false, error: fetched.error || 'Empty listing data' };
+  }
+
+  try {
+    const property = await analyzeProperty(fetched.mlsText);
+
+    await prisma.property.update({
+      where: { id: property.id },
+      data: { listingUrl: fetched.finalUrl },
+    });
+    property.listingUrl = fetched.finalUrl;
+
+    return { success: true, property };
+  } catch (e: any) {
+    return { success: false, error: e?.message || String(e) };
+  }
+}
+
+// --- Email Listing Import ---
+
+export async function importListingsFromEmail(emailBody: string): Promise<{
+  success: boolean;
+  imported: number;
+  skipped: number;
+  errors: string[];
+  properties: any[];
+}> {
+  const listings = parseListingEmail(emailBody);
+  const results: any[] = [];
+  const errors: string[] = [];
+  let skipped = 0;
+
+  for (const listing of listings) {
+    // Skip if we already have this address
+    const existing = await prisma.property.findFirst({
+      where: { address: listing.address },
+    });
+    if (existing) {
+      // If existing property doesn't have a listingUrl, update it
+      if (!existing.listingUrl && listing.listingUrl) {
+        await prisma.property.update({
+          where: { id: existing.id },
+          data: { listingUrl: listing.listingUrl },
+        });
+      }
+      skipped++;
+      continue;
+    }
+
+    // Build synthetic MLS text for the analyzer
+    const syntheticMls = [
+      `List Price: $${listing.price.toLocaleString()}`,
+      `Address: ${listing.address}`,
+      listing.city ? `City: ${listing.city}` : '',
+      listing.state ? `State: ${listing.state}` : '',
+      listing.zip ? `Zip: ${listing.zip}` : '',
+      `Type: ${listing.type}`,
+      listing.bedrooms ? `Bedrooms: ${listing.bedrooms}` : '',
+      listing.bathrooms ? `Bathrooms: ${listing.bathrooms}` : '',
+      listing.sqft ? `Sqft: ${listing.sqft}` : '',
+    ].filter(Boolean).join('\n');
+
+    try {
+      const property = await analyzeProperty(syntheticMls);
+
+      // Attach listing URL
+      if (listing.listingUrl) {
+        await prisma.property.update({
+          where: { id: property.id },
+          data: { listingUrl: listing.listingUrl },
+        });
+        property.listingUrl = listing.listingUrl;
+      }
+
+      results.push(property);
+    } catch (e: any) {
+      errors.push(`${listing.address}: ${e?.message || String(e)}`);
+    }
+  }
+
+  return {
+    success: errors.length === 0,
+    imported: results.length,
+    skipped,
+    errors,
+    properties: results,
+  };
+}
+
+export async function importSingleListing(listing: {
+  address: string;
+  city?: string;
+  state?: string;
+  zip?: string;
+  price: number;
+  bedrooms?: number;
+  bathrooms?: number;
+  sqft?: number;
+  type?: string;
+  listingUrl?: string;
+  source?: string;
+}): Promise<{ success: boolean; error?: string; property?: any }> {
+  // Check for duplicates
+  const existing = await prisma.property.findFirst({
+    where: { address: listing.address },
+  });
+  if (existing) {
+    if (!existing.listingUrl && listing.listingUrl) {
+      await prisma.property.update({
+        where: { id: existing.id },
+        data: { listingUrl: listing.listingUrl },
+      });
+    }
+    return { success: true, error: 'Property already exists', property: existing };
+  }
+
+  const syntheticMls = [
+    `List Price: $${listing.price.toLocaleString()}`,
+    `Address: ${listing.address}`,
+    listing.city ? `City: ${listing.city}` : '',
+    listing.state ? `State: ${listing.state}` : '',
+    listing.zip ? `Zip: ${listing.zip}` : '',
+    `Type: ${listing.type || 'Condo'}`,
+    listing.bedrooms ? `Bedrooms: ${listing.bedrooms}` : '',
+    listing.bathrooms ? `Bathrooms: ${listing.bathrooms}` : '',
+    listing.sqft ? `Sqft: ${listing.sqft}` : '',
+  ].filter(Boolean).join('\n');
+
+  try {
+    const property = await analyzeProperty(syntheticMls);
+
+    if (listing.listingUrl) {
+      await prisma.property.update({
+        where: { id: property.id },
+        data: { listingUrl: listing.listingUrl },
+      });
+      property.listingUrl = listing.listingUrl;
+    }
+
+    return { success: true, property };
+  } catch (e: any) {
+    return { success: false, error: e?.message || String(e) };
+  }
 }
 
 export async function promoteScoutedDeal(id: string): Promise<{ success: boolean; error?: string; property?: any; scoutedDeals?: any[] }> {

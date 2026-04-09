@@ -1,0 +1,190 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { importListingsFromEmail, importSingleListing, importListingFromUrl, analyzeProperty } from '@/lib/actions';
+import { extractListingUrls } from '@/lib/email-listing-parser';
+import prisma from '@/lib/db';
+
+/**
+ * POST /api/email-sync
+ *
+ * Accepts email body text and imports property listings found in it.
+ *
+ * Body (JSON):
+ *   { "emailBody": "..." }          — parse and import all listings from email text
+ *   { "listing": { ... } }          — import a single listing directly
+ *   { "listings": [ { ... }, ... ] } — import multiple listings directly
+ */
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json();
+
+    // Mode -1: Raw MLS text from an email — may contain multiple listings
+    if (body.mlsText && typeof body.mlsText === 'string') {
+      // MLS broker emails often contain multiple listings. Split on MLS ID markers.
+      // Common split markers: "MLS #12345", "MLS#: 12345", or multiple "List Price:" occurrences.
+      const text = body.mlsText;
+
+      // Find all MLS IDs and their positions
+      const mlsIdRegex = /MLS\s*#?\s*:?\s*(\d{6,})/gi;
+      const mlsMatches = Array.from(text.matchAll(mlsIdRegex)) as RegExpMatchArray[];
+
+      // If multiple MLS IDs found, split into individual listings
+      const chunks: string[] = [];
+      if (mlsMatches.length > 1) {
+        for (let i = 0; i < mlsMatches.length; i++) {
+          const start = mlsMatches[i].index!;
+          const end = i + 1 < mlsMatches.length ? mlsMatches[i + 1].index! : text.length;
+          // Include ~500 chars before the MLS ID to capture address/price that may precede it
+          const chunkStart = Math.max(0, start - 500);
+          chunks.push(text.substring(chunkStart, end));
+        }
+      } else {
+        chunks.push(text);
+      }
+
+      const results: any[] = [];
+      const errors: string[] = [];
+      let imported = 0;
+      let skipped = 0;
+
+      for (const chunk of chunks) {
+        // Skip chunks with no price
+        if (!/\$\s*[\d,]{4,}|list\s*price/i.test(chunk)) continue;
+
+        // Dedupe by MLS ID
+        const mlsIdMatch = chunk.match(/MLS\s*#?\s*:?\s*(\d{6,})/i);
+        if (mlsIdMatch) {
+          const existing = await prisma.property.findFirst({ where: { mlsId: mlsIdMatch[1] } });
+          if (existing) {
+            skipped++;
+            continue;
+          }
+        }
+
+        try {
+          const property = await analyzeProperty(chunk);
+          results.push(property);
+          imported++;
+        } catch (e: any) {
+          errors.push(`MLS chunk: ${e?.message || String(e)}`);
+        }
+      }
+
+      return NextResponse.json({
+        success: errors.length === 0,
+        imported,
+        skipped,
+        errors,
+        properties: results,
+      });
+    }
+
+    // Mode 0: A single listing URL — fetch the page and import
+    if (body.url && typeof body.url === 'string') {
+      const result = await importListingFromUrl(body.url);
+      return NextResponse.json(result);
+    }
+
+    // Mode 0b: Multiple URLs — fetch each and import
+    if (body.urls && Array.isArray(body.urls)) {
+      const results: any[] = [];
+      const errors: string[] = [];
+      let imported = 0;
+
+      for (const url of body.urls) {
+        const r = await importListingFromUrl(url);
+        if (r.success && r.property) {
+          imported++;
+          results.push(r.property);
+        } else {
+          errors.push(`${url}: ${r.error}`);
+        }
+      }
+
+      return NextResponse.json({
+        success: errors.length === 0,
+        imported,
+        skipped: 0,
+        errors,
+        properties: results,
+      });
+    }
+
+    // Mode 1: Raw email body — extract URLs, fetch each, import
+    if (body.emailBody) {
+      // Prefer URL-based extraction since emails only contain snippets
+      const urls = extractListingUrls(body.emailBody);
+
+      if (urls.length > 0) {
+        const results: any[] = [];
+        const errors: string[] = [];
+        let imported = 0;
+
+        for (const url of urls) {
+          const r = await importListingFromUrl(url);
+          if (r.success && r.property) {
+            imported++;
+            results.push(r.property);
+          } else {
+            errors.push(`${url}: ${r.error}`);
+          }
+        }
+
+        return NextResponse.json({
+          success: errors.length === 0,
+          imported,
+          skipped: 0,
+          errors,
+          properties: results,
+        });
+      }
+
+      // Fall back to legacy in-email parsing (returns empty now, but kept for API shape)
+      const result = await importListingsFromEmail(body.emailBody);
+      return NextResponse.json(result);
+    }
+
+    // Mode 2: Single structured listing
+    if (body.listing) {
+      const result = await importSingleListing(body.listing);
+      return NextResponse.json(result);
+    }
+
+    // Mode 3: Multiple structured listings
+    if (body.listings && Array.isArray(body.listings)) {
+      const results = [];
+      let imported = 0;
+      let skipped = 0;
+      const errors: string[] = [];
+
+      for (const listing of body.listings) {
+        const result = await importSingleListing(listing);
+        if (result.success && !result.error) {
+          imported++;
+          results.push(result.property);
+        } else if (result.error === 'Property already exists') {
+          skipped++;
+        } else {
+          errors.push(`${listing.address}: ${result.error}`);
+        }
+      }
+
+      return NextResponse.json({
+        success: errors.length === 0,
+        imported,
+        skipped,
+        errors,
+        properties: results,
+      });
+    }
+
+    return NextResponse.json(
+      { error: 'Request must include "emailBody", "listing", or "listings"' },
+      { status: 400 },
+    );
+  } catch (e: any) {
+    return NextResponse.json(
+      { error: e?.message || String(e) },
+      { status: 500 },
+    );
+  }
+}
