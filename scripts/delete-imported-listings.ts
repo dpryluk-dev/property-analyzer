@@ -47,24 +47,35 @@ async function main() {
 
   console.log('\n🗑  Delete imported listings\n');
 
-  // Build where clause
-  const where: any = {
-    listingUrl: { contains: 'zillow.com/homedetails' },
+  // Build where clause: match properties that were imported by the email-sync
+  // script. We identify them via either:
+  //   (a) listingUrl containing a real estate domain, OR
+  //   (b) rawMls starting with our import markers
+  const scriptImported = {
+    OR: [
+      { listingUrl: { contains: 'zillow.com' } },
+      { listingUrl: { contains: 'redfin.com' } },
+      { listingUrl: { contains: 'realtor.com' } },
+      { rawMls: { startsWith: '[Imported from Zillow via email sync]' } },
+      { rawMls: { startsWith: '[Imported from MLS via email sync]' } },
+    ],
   };
+
+  const where: any = { ...scriptImported };
 
   if (days > 0) {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
     where.createdAt = { gte: cutoff };
-    console.log(`   Filter: created in last ${days} days`);
+    console.log(`   Filter: script-imported, last ${days} days`);
   } else if (!all) {
     // Default: only today
     const cutoff = new Date();
     cutoff.setHours(0, 0, 0, 0);
     where.createdAt = { gte: cutoff };
-    console.log(`   Filter: created today`);
+    console.log(`   Filter: script-imported, created today`);
   } else {
-    console.log(`   Filter: all Zillow-imported listings (no date filter)`);
+    console.log(`   Filter: all script-imported listings (no date filter)`);
   }
 
   // Preview what would be deleted

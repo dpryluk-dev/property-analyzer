@@ -648,6 +648,9 @@ async function main() {
 
   const query = customQuery || [
     `after:${afterStr}`,
+    // Include trashed/archived emails so retro reruns work even after a
+    // previous run moved emails to trash.
+    'in:anywhere',
     '(subject:listing OR subject:property OR subject:home OR subject:"new on market" OR subject:"price reduced" OR subject:"just listed" OR subject:alert OR "MLS #" OR "List Price")',
     '(from:zillow OR from:redfin OR from:realtor.com OR from:trulia OR from:homes.com OR from:compass OR from:mls OR from:coldwell OR from:keller OR from:remax OR from:mlspin OR from:flexmls OR from:matrix OR from:paragon OR from:rappattoni OR from:ntreis OR from:stellar)',
   ].join(' ');
@@ -1060,7 +1063,7 @@ async function main() {
                 listingUrl: mlsListingUrl,
                 parking: parsed.parking,
                 dom: parsed.dom,
-                rawMls: chunk.substring(0, 50000),
+                rawMls: `[Imported from MLS via email sync]\n${chunk}`.substring(0, 50000),
                 adjPrice: parsed.listPrice,
                 adjRent: rent,
                 rentResearch: {
