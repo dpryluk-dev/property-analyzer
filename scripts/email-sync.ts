@@ -35,7 +35,7 @@ loadEnvFile(path.resolve('.env'));
 import { extractListingUrls } from '../src/lib/email-listing-parser';
 import { researchRent } from '../src/lib/rent-research';
 import { analyze } from '../src/lib/analysis';
-import type { ParsedProperty } from '../src/lib/parser';
+import { parseMLS, type ParsedProperty } from '../src/lib/parser';
 import prisma from '../src/lib/db';
 
 interface ExtractedListing {
@@ -313,6 +313,35 @@ function parseZillowHtml(html: string): Partial<ExtractedListing> {
         return null;
       };
 
+      // Walk the ENTIRE object tree looking for HOA and tax keys anywhere.
+      // Zillow nests these under hdpData.homeInfo, resoFacts, and other places.
+      const hoaCandidates: number[] = [];
+      const taxCandidates: number[] = [];
+      const taxRateCandidates: number[] = [];
+      const walk = (obj: any, depth = 0) => {
+        if (!obj || depth > 20 || typeof obj !== 'object') return;
+        if (Array.isArray(obj)) {
+          for (const item of obj) walk(item, depth + 1);
+          return;
+        }
+        for (const key in obj) {
+          const val = obj[key];
+          if (typeof val === 'number' && val > 0) {
+            if (/(^|_)(monthly)?hoa(fee)?($|_)/i.test(key) || /associationfee/i.test(key)) {
+              if (val < 5000) hoaCandidates.push(val);
+            }
+            if (/taxannualamount|annualtax|propertytax(amount|annual)/i.test(key)) {
+              if (val > 100 && val < 500000) taxCandidates.push(val);
+            }
+            if (/propertytaxrate/i.test(key)) {
+              if (val > 0 && val < 10) taxRateCandidates.push(val);
+            }
+          }
+          if (typeof val === 'object') walk(val, depth + 1);
+        }
+      };
+      walk(nextData);
+
       const prop = findProperty(nextData);
       if (prop) {
         if (!result.price && prop.price) result.price = typeof prop.price === 'number' ? prop.price : parseFloat(prop.price);
@@ -322,10 +351,6 @@ function parseZillowHtml(html: string): Partial<ExtractedListing> {
           result.sqft = prop.livingArea || prop.livingAreaValue;
         }
         if (!result.yearBuilt && prop.yearBuilt) result.yearBuilt = prop.yearBuilt;
-        if (prop.monthlyHoaFee || prop.hoaFee) result.hoaFee = prop.monthlyHoaFee || prop.hoaFee;
-        if (prop.propertyTaxRate && (result.price || prop.price)) {
-          result.taxAnnual = Math.round((result.price || prop.price) * prop.propertyTaxRate / 100);
-        }
         if (!result.address && prop.address) {
           result.address = prop.address.streetAddress || result.address;
           result.city = prop.address.city || result.city;
@@ -333,23 +358,65 @@ function parseZillowHtml(html: string): Partial<ExtractedListing> {
           result.zip = prop.address.zipcode || result.zip;
         }
       }
+
+      // Take the most plausible HOA value (mode or first)
+      if (!result.hoaFee && hoaCandidates.length > 0) {
+        // Prefer the most-common value
+        const counts = new Map<number, number>();
+        for (const v of hoaCandidates) counts.set(v, (counts.get(v) || 0) + 1);
+        const mostCommon = Array.from(counts.entries()).sort((a, b) => b[1] - a[1])[0];
+        result.hoaFee = mostCommon[0];
+      }
+
+      // Tax: prefer explicit annual amount, else compute from rate
+      if (!result.taxAnnual && taxCandidates.length > 0) {
+        result.taxAnnual = Math.max(...taxCandidates);
+      }
+      if (!result.taxAnnual && taxRateCandidates.length > 0 && (result.price || 0) > 0) {
+        const rate = taxRateCandidates[0];
+        result.taxAnnual = Math.round(result.price! * rate / 100);
+      }
     } catch {}
   }
 
-  // 4. Regex fallbacks for HOA / tax
+  // 4. Regex fallbacks for HOA / tax on the raw HTML (last resort, picks up
+  //    values that are rendered as text only)
   if (!result.hoaFee) {
-    const m = html.match(/"monthlyHoaFee"\s*:\s*(\d+)/) || html.match(/HOA[^$]{0,50}\$(\d+)\s*\/?\s*mo/i);
-    if (m) result.hoaFee = parseInt(m[1]);
+    const patterns = [
+      /"monthlyHoaFee"\s*:\s*(\d+)/,
+      /"hoaFee"\s*:\s*(\d+)/,
+      /"associationFee"\s*:\s*(\d+)/,
+      /HOA[^$]{0,80}\$\s*(\d{2,4})\s*\/?\s*mo/i,
+      /HOA\s*(?:fee|dues)[^$]{0,40}\$\s*(\d{2,4})/i,
+      /Association\s*Fee[^$]{0,40}\$\s*(\d{2,4})/i,
+      /\$\s*(\d{2,4})\s*\/\s*mo\s*HOA/i,
+    ];
+    for (const p of patterns) {
+      const m = html.match(p);
+      if (m) {
+        const val = parseInt(m[1]);
+        if (val > 0 && val < 5000) {
+          result.hoaFee = val;
+          break;
+        }
+      }
+    }
   }
   if (!result.taxAnnual) {
-    const m = html.match(/"taxAnnualAmount"\s*:\s*(\d+)/) || html.match(/"annualHomeownersInsurance"\s*:\s*\d+[^}]*?"propertyTaxRate"\s*:\s*([\d.]+)/);
-    if (m) {
-      const val = parseFloat(m[1]);
-      if (val < 10) {
-        // It's a rate, convert to annual amount
-        if (result.price) result.taxAnnual = Math.round(result.price * val / 100);
-      } else {
-        result.taxAnnual = val;
+    const patterns = [
+      /"taxAnnualAmount"\s*:\s*(\d+)/,
+      /"annualTaxAmount"\s*:\s*(\d+)/,
+      /annual\s*tax[^$]{0,50}\$\s*([\d,]+)/i,
+      /property\s*tax[^$]{0,30}\$\s*([\d,]+)\s*\/\s*yr/i,
+    ];
+    for (const p of patterns) {
+      const m = html.match(p);
+      if (m) {
+        const val = parseInt(String(m[1]).replace(/,/g, ''));
+        if (val > 100 && val < 500000) {
+          result.taxAnnual = val;
+          break;
+        }
       }
     }
   }
@@ -607,11 +674,13 @@ async function main() {
   const extractedListings: ExtractedListing[] = [];
   const trackingUrlToEmail = new Map<string, { subject: string; body: string; msgId: string }>();
   const messageIdToUrls = new Map<string, Set<string>>(); // msgId -> set of canonical URLs
+  const mlsBodies: { subject: string; body: string; msgId: string }[] = [];
 
   for (const msgId of messageIds) {
     const msg = await gmailFetch(accessToken, `messages/${msgId}?format=full`);
 
     const subject = msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === 'subject')?.value || '';
+    const from = msg.payload?.headers?.find((h: any) => h.name.toLowerCase() === 'from')?.value || '';
 
     let body = '';
     if (msg.payload?.body?.data) {
@@ -623,6 +692,24 @@ async function main() {
     if (!body) continue;
 
     console.log(`   📬 ${subject.substring(0, 70)}`);
+
+    // Detect MLS-format emails (pinergy@mlspin.com, Matrix, etc.) by signals
+    const mlsSignals = [
+      /MLS\s*#\s*\d+/i,
+      /List\s*Price\s*[:$]/i,
+      /Living\s*Area/i,
+      /Total\s*Rooms/i,
+      /\bDOM\b/i,
+    ];
+    const mlsSignalCount = mlsSignals.filter(p => p.test(body)).length;
+    const isMls = mlsSignalCount >= 2 || /mlspin\.com/i.test(from);
+
+    if (isMls) {
+      console.log(`      → MLS-format email from ${from.substring(0, 40)}`);
+      mlsBodies.push({ subject, body, msgId });
+      messageIdToUrls.set(msgId, new Set());
+      continue;
+    }
 
     const urls = extractListingUrls(body);
     for (const u of urls) {
@@ -750,14 +837,11 @@ async function main() {
     });
   }
 
-  // MLS-format emails: find them too
-  const mlsBodies: { subject: string; body: string }[] = [];
-  // (MLS handling left for later — prioritize the Zillow path first)
-
   console.log(`\n📊 Summary:`);
-  console.log(`   ${extractedListings.length} unique listings extracted\n`);
+  console.log(`   ${extractedListings.length} aggregator listings (Zillow/Redfin)`);
+  console.log(`   ${mlsBodies.length} MLS-format emails\n`);
 
-  if (extractedListings.length === 0) {
+  if (extractedListings.length === 0 && mlsBodies.length === 0) {
     console.log('No listings found. Try adjusting --days or --query.');
     return;
   }
@@ -847,6 +931,151 @@ async function main() {
       // Small pacing between listings
       if (i < extractedListings.length - 1) {
         await new Promise(r => setTimeout(r, 3000));
+      }
+    }
+
+    // Process MLS-format emails (pinergy@mlspin.com etc.)
+    if (mlsBodies.length > 0) {
+      console.log(`\n📄 Processing ${mlsBodies.length} MLS-format email(s)...`);
+
+      for (const mlsEmail of mlsBodies) {
+        const status = messageImportStatus.get(mlsEmail.msgId) || { total: 0, imported: 0, failed: 0 };
+        messageImportStatus.set(mlsEmail.msgId, status);
+
+        // Split the body on MLS ID markers — one email may contain several listings
+        const text = mlsEmail.body;
+        const mlsIdRegex = /MLS\s*#?\s*:?\s*(\d{6,})/gi;
+        const mlsMatches = Array.from(text.matchAll(mlsIdRegex)) as RegExpMatchArray[];
+
+        const chunks: string[] = [];
+        if (mlsMatches.length > 1) {
+          for (let i = 0; i < mlsMatches.length; i++) {
+            const start = mlsMatches[i].index!;
+            const end = i + 1 < mlsMatches.length ? mlsMatches[i + 1].index! : text.length;
+            chunks.push(text.substring(Math.max(0, start - 500), end));
+          }
+        } else {
+          chunks.push(text);
+        }
+
+        status.total = chunks.filter(c => /\$[\d,]{4,}|list\s*price/i.test(c)).length;
+
+        for (const chunk of chunks) {
+          if (!/\$[\d,]{4,}|list\s*price/i.test(chunk)) continue;
+
+          try {
+            const parsed = parseMLS(chunk);
+            if (!parsed.listPrice) {
+              console.log(`   ⏭️  ${parsed.address || 'Unknown'} — no price`);
+              status.failed++;
+              continue;
+            }
+
+            // Dedupe by MLS ID
+            if (parsed.mlsId) {
+              const existing = await prisma.property.findFirst({ where: { mlsId: parsed.mlsId } });
+              if (existing) {
+                console.log(`   ⏭️  ${parsed.address || existing.address} — already in portfolio (MLS #${parsed.mlsId})`);
+                status.imported++; // count as success for trash logic
+                skippedCount++;
+                continue;
+              }
+            }
+
+            process.stdout.write(`   ${(parsed.address || 'Unknown').substring(0, 45).padEnd(45)} `);
+
+            // Rent research via Claude
+            const rentData = await researchRent(parsed);
+            const rent = Number.isFinite(rentData.rent) && rentData.rent > 0 ? rentData.rent : 0;
+
+            // Run analysis
+            const analysisResult = analyze(parsed, rent, parsed.listPrice);
+
+            // Save full Property + analysis + rent research
+            const saved = await prisma.property.create({
+              include: { analysis: true, rentResearch: true },
+              data: {
+                mlsId: parsed.mlsId || null,
+                address: parsed.address || 'Unknown',
+                city: parsed.city || null,
+                state: parsed.state,
+                zip: parsed.zip || null,
+                type: parsed.type,
+                complex: parsed.complex || null,
+                bedrooms: parsed.bedrooms,
+                bathrooms: parsed.bathrooms,
+                sqft: parsed.sqft,
+                yearBuilt: parsed.yearBuilt || null,
+                listPrice: parsed.listPrice,
+                hoaFee: parsed.hoaFee,
+                hoaIncludes: parsed.hoaIncludes || null,
+                taxAnnual: parsed.taxAnnual,
+                taxYear: parsed.taxYear,
+                assessed: parsed.assessed || null,
+                parking: parsed.parking,
+                dom: parsed.dom,
+                rawMls: chunk.substring(0, 50000),
+                adjPrice: parsed.listPrice,
+                adjRent: rent,
+                rentResearch: {
+                  create: {
+                    rent,
+                    low: Number.isFinite(rentData.low) ? rentData.low : 0,
+                    high: Number.isFinite(rentData.high) ? rentData.high : 0,
+                    confidence: rentData.confidence || 'Low',
+                    methodology: rentData.methodology || null,
+                    comps: {
+                      create: (rentData.comps || []).map(c => ({
+                        address: String(c.address || 'Unknown'),
+                        rent: Number.isFinite(c.rent) ? c.rent : 0,
+                        note: c.note ? String(c.note) : null,
+                      })),
+                    },
+                  },
+                },
+                analysis: {
+                  create: {
+                    priceUsed: parsed.listPrice,
+                    rentUsed: rent,
+                    totalExpMo: analysisResult.totalExpMo,
+                    netMo: analysisResult.netMo,
+                    capRate: analysisResult.capRate,
+                    expRatio: analysisResult.expRatio,
+                    grm: analysisResult.grm,
+                    breakMo: analysisResult.breakMo,
+                    rating: analysisResult.rating,
+                    expenses: {
+                      create: analysisResult.expenses.map((e, i) => ({
+                        name: e.name,
+                        monthly: e.monthly,
+                        note: e.note,
+                        sortOrder: i,
+                      })),
+                    },
+                    observations: {
+                      create: analysisResult.observations.map(o => ({
+                        color: o.color,
+                        icon: o.icon,
+                        text: o.text,
+                      })),
+                    },
+                  },
+                },
+              },
+            });
+            console.log(`✅ rent $${rent.toLocaleString()} · ${(saved as any).analysis?.rating || ''} · ${(saved as any).analysis?.capRate?.toFixed?.(1) || '?'}% cap`);
+            importedCount++;
+            status.imported++;
+          } catch (e: any) {
+            const msg = e?.message || String(e);
+            console.log(`❌ ${msg.substring(0, 80)}`);
+            importErrors.push(`MLS chunk: ${msg}`);
+            status.failed++;
+          }
+
+          // Pacing
+          await new Promise(r => setTimeout(r, 3000));
+        }
       }
     }
   } else {
